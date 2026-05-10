@@ -51,6 +51,7 @@ def default_config() -> dict[str, Any]:
         "output": {
             "output_dir": "outputs",
             "run_name": None,
+            "run_type": "auto",
         },
         "model": {
             "name": "UNet2D",
@@ -98,6 +99,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-dir", type=str, default=None)
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--run-name", type=str, default=None)
+    parser.add_argument(
+        "--run-type",
+        choices=["auto", "train", "test"],
+        default=None,
+        help="Output subfolder: train for full runs, test for smoke/debug runs.",
+    )
+    parser.add_argument(
+        "--smoke-test",
+        action="store_true",
+        help="Route outputs to test/ and default to one epoch when --epochs is omitted.",
+    )
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument(
         "--batch-size-per-gpu",
@@ -162,6 +174,7 @@ def build_effective_config(args: argparse.Namespace) -> dict[str, Any]:
         ("data", "img_size"): args.img_size,
         ("output", "output_dir"): args.output_dir,
         ("output", "run_name"): args.run_name,
+        ("output", "run_type"): args.run_type,
         ("model", "base_channels"): args.base_channels,
         ("training", "epochs"): args.epochs,
         ("training", "batch_size_per_gpu"): args.batch_size_per_gpu,
@@ -179,9 +192,25 @@ def build_effective_config(args: argparse.Namespace) -> dict[str, Any]:
         if value is not None:
             cfg[section][key] = value
 
+    if args.smoke_test:
+        cfg["output"]["run_type"] = "test"
+        if args.epochs is None:
+            cfg["training"]["epochs"] = 1
+
     if str(cfg["training"]["scheduler"]).lower() == "none":
         cfg["training"]["scheduler"] = None
     return cfg
+
+
+def resolve_run_group(cfg: dict[str, Any], world_size: int) -> str:
+    run_type = str(cfg["output"].get("run_type", "auto")).lower()
+    if run_type not in {"auto", "train", "test"}:
+        raise ValueError(f"Unsupported output.run_type: {run_type!r}")
+    if run_type != "auto":
+        return run_type
+
+    epochs = int(cfg["training"]["epochs"])
+    return "test" if epochs <= 1 and world_size == 1 else "train"
 
 
 def distributed_is_initialized() -> bool:
@@ -464,11 +493,14 @@ def main() -> None:
         is_main = rank == 0
 
         seed_everything(int(cfg["training"]["seed"]), rank=rank)
+        run_group = resolve_run_group(cfg, world_size)
+        cfg["output"]["run_type"] = run_group
 
         if is_main:
             run_dirs = create_run_directories(
                 cfg["output"]["output_dir"],
                 cfg["output"].get("run_name"),
+                run_group=run_group,
             )
             run_dir_str = str(run_dirs["run_dir"])
         else:
@@ -519,6 +551,11 @@ def main() -> None:
             logs_dir / "testing.log",
             enabled=is_main,
         )
+        best_model_logger = setup_file_logger(
+            "best_model",
+            logs_dir / "best_model.log",
+            enabled=is_main,
+        )
         error_logger = setup_file_logger(
             "errors",
             logs_dir / "errors.log",
@@ -536,6 +573,7 @@ def main() -> None:
             "local_rank": local_rank,
             "device": str(device),
             "total_batch_size": int(cfg["training"]["batch_size_per_gpu"]) * world_size,
+            "run_group": run_group,
         }
 
         if is_main:
@@ -709,6 +747,7 @@ def main() -> None:
                 "num_workers": num_workers,
                 "mixed_precision": cfg["training"]["mixed_precision"],
                 "ddp_world_size": world_size,
+                "run_group": run_group,
             }
             log_dict(hyper_logger, hyperparameters, title="hyperparameters")
 
@@ -716,6 +755,7 @@ def main() -> None:
         epochs = int(cfg["training"]["epochs"])
         threshold = float(cfg["metrics"]["threshold"])
         grad_clip_norm = float(cfg["training"].get("grad_clip_norm", 0.0))
+        best_model_metrics: dict[str, Any] | None = None
 
         for epoch in range(start_epoch, epochs + 1):
             if train_sampler is not None:
@@ -791,18 +831,6 @@ def main() -> None:
                     best_val_dice=best_val_dice,
                     config=cfg,
                 )
-                if is_best:
-                    save_checkpoint(
-                        checkpoints_dir / "best_model.pth",
-                        model=model,
-                        optimizer=optimizer,
-                        scheduler=scheduler,
-                        scaler=scaler,
-                        epoch=epoch,
-                        best_val_dice=best_val_dice,
-                        config=cfg,
-                    )
-
                 row = {
                     "epoch": epoch,
                     "train_loss": train_metrics["total_loss"],
@@ -826,6 +854,47 @@ def main() -> None:
                 history.append(row)
                 write_history_csv(history, metrics_dir / "history.csv")
                 save_json(history, metrics_dir / "history.json")
+
+                if is_best:
+                    best_checkpoint_path = checkpoints_dir / "best_model.pth"
+                    save_checkpoint(
+                        best_checkpoint_path,
+                        model=model,
+                        optimizer=optimizer,
+                        scheduler=scheduler,
+                        scaler=scaler,
+                        epoch=epoch,
+                        best_val_dice=best_val_dice,
+                        config=cfg,
+                    )
+                    best_model_metrics = {
+                        "checkpoint_path": str(best_checkpoint_path),
+                        "epoch": epoch,
+                        "best_val_dice": best_val_dice,
+                        "train": train_metrics,
+                        "validation": val_metrics,
+                        "lr": lr,
+                        "epoch_time_sec": epoch_time,
+                        "gpu_memory_gb": gpu_memory_gb,
+                        "run_group": run_group,
+                    }
+                    save_json(
+                        best_model_metrics,
+                        metrics_dir / "best_model_metrics.json",
+                    )
+                    best_model_logger.info(
+                        "saved_best_model | epoch=%d | checkpoint_path=%s | "
+                        "best_val_dice=%.6f | %s | %s | lr=%.8g | "
+                        "epoch_time_sec=%.2f | gpu_memory_gb=%.3f",
+                        epoch,
+                        best_checkpoint_path,
+                        best_val_dice,
+                        format_epoch_metrics("train", train_metrics),
+                        format_epoch_metrics("val", val_metrics),
+                        lr,
+                        epoch_time,
+                        gpu_memory_gb,
+                    )
 
             if distributed_is_initialized():
                 dist.barrier()
@@ -853,8 +922,23 @@ def main() -> None:
         if is_main:
             testing_logger.info("checkpoint_path: %s", best_checkpoint_path)
             testing_logger.info("%s", format_epoch_metrics("test", test_metrics))
+            if best_model_metrics is None:
+                best_model_metrics = {
+                    "checkpoint_path": str(best_checkpoint_path),
+                    "epoch": int(best_checkpoint.get("epoch", 0)),
+                    "best_val_dice": float(best_checkpoint.get("best_val_dice", 0.0)),
+                    "run_group": run_group,
+                }
+            best_model_metrics["test"] = test_metrics
+            save_json(best_model_metrics, metrics_dir / "best_model_metrics.json")
+            best_model_logger.info(
+                "test_evaluation | checkpoint_path=%s | %s",
+                best_checkpoint_path,
+                format_epoch_metrics("test", test_metrics),
+            )
             test_output = {
                 "checkpoint_path": str(best_checkpoint_path),
+                "best_model": best_model_metrics,
                 "total_loss": test_metrics["total_loss"],
                 "loss": test_metrics["total_loss"],
                 "bce_loss": test_metrics["bce_loss"],

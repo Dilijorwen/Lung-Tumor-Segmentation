@@ -6,6 +6,7 @@ data:
 output:
   output_dir: ../outputs
   run_name: null
+  run_type: auto
 
 model:
   name: UNet2D

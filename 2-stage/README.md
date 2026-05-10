@@ -25,6 +25,22 @@ torchrun --nproc_per_node=4 train_ddp.py \
   --img-size 512
 ```
 
+Полные запуски пишутся в `outputs/train/run_YYYYMMDD_HHMMSS/`.
+Smoke/debug запуск на 1 эпоху и 1 GPU автоматически пишется в `outputs/test/run_YYYYMMDD_HHMMSS/`.
+
+Smoke test:
+
+```bash
+torchrun --nproc_per_node=1 train_ddp.py \
+  --data-dir /workspace/data/preprocessed_npy \
+  --output-dir /workspace/outputs \
+  --epochs 1 \
+  --batch-size-per-gpu 2 \
+  --num-workers 2
+```
+
+Лучший checkpoint сохраняется как `checkpoints/best_model.pth`, а метрики эпохи, на которой он был выбран, дополнительно пишутся в `logs/best_model.log` и `metrics/best_model_metrics.json`.
+
 ## Docker
 
 Из корня репозитория:

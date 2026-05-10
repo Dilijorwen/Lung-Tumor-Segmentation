@@ -11,11 +11,15 @@ import yaml
 def create_run_directories(
     output_dir: str | Path,
     run_name: str | None = None,
+    run_group: str | None = None,
 ) -> dict[str, Path]:
     output_dir = Path(output_dir).expanduser().resolve(strict=False)
     if run_name is None:
         run_name = datetime.now().strftime("run_%Y%m%d_%H%M%S")
-    run_dir = output_dir / run_name
+    if run_group is None:
+        run_dir = output_dir / run_name
+    else:
+        run_dir = output_dir / run_group / run_name
 
     dirs = {
         "run_dir": run_dir,

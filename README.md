@@ -65,18 +65,22 @@ docker compose -f 2-stage/docker-compose.yml up --build
 
 ## Артефакты обучения
 
-Каждый запуск пишет отдельную директорию `outputs/run_YYYYMMDD_HHMMSS/`:
+Каждый запуск пишет отдельную директорию `outputs/<тип>/run_YYYYMMDD_HHMMSS/`:
+
+Полное обучение сохраняется в `outputs/train/run_YYYYMMDD_HHMMSS/`, smoke/debug запуск на 1 эпоху и 1 GPU автоматически сохраняется в `outputs/test/run_YYYYMMDD_HHMMSS/`.
 
 - `logs/data_loading.log`
 - `logs/hyperparameters.log`
 - `logs/training.log`
 - `logs/validation.log`
 - `logs/testing.log`
+- `logs/best_model.log`
 - `logs/errors.log`
 - `checkpoints/best_model.pth`
 - `checkpoints/last_model.pth`
 - `metrics/history.csv`
 - `metrics/history.json`
+- `metrics/best_model_metrics.json`
 - `metrics/test_metrics.json`
 - `metrics/split_statistics.json`
 - `config.yaml`
@@ -85,7 +89,7 @@ docker compose -f 2-stage/docker-compose.yml up --build
 
 ```bash
 python 2-stage/inference.py \
-  --checkpoint outputs/run_YYYYMMDD_HHMMSS/checkpoints/best_model.pth \
+  --checkpoint outputs/train/run_YYYYMMDD_HHMMSS/checkpoints/best_model.pth \
   --input preprocessed_npy/test/lung_001/images/z0000.npy \
   --output-mask pred_mask.npy \
   --output-prob pred_prob.npy
