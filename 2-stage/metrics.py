@@ -25,7 +25,6 @@ def metrics_from_confusion(
     tp, fp, fn, tn = [value.item() for value in confusion.detach().cpu()]
 
     dice = (2.0 * tp) / (2.0 * tp + fp + fn + eps)
-    iou = tp / (tp + fp + fn + eps)
     precision = tp / (tp + fp + eps)
     recall = tp / (tp + fn + eps)
     specificity = tn / (tn + fp + eps)
@@ -33,7 +32,6 @@ def metrics_from_confusion(
     return {
         "dice": dice,
         "f1_score": dice,
-        "iou": iou,
         "precision": precision,
         "recall": recall,
         "specificity": specificity,

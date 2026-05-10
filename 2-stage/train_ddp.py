@@ -472,7 +472,6 @@ def format_epoch_metrics(prefix: str, metrics: dict[str, float]) -> str:
         f"{prefix}_dice_loss={metrics['dice_loss']:.6f}, "
         f"{prefix}_dice={metrics['dice']:.6f}, "
         f"{prefix}_f1={metrics['f1_score']:.6f}, "
-        f"{prefix}_iou={metrics['iou']:.6f}, "
         f"{prefix}_precision={metrics['precision']:.6f}, "
         f"{prefix}_recall={metrics['recall']:.6f}"
     )
@@ -838,13 +837,11 @@ def main() -> None:
                     "train_dice_loss": train_metrics["dice_loss"],
                     "train_dice": train_metrics["dice"],
                     "train_f1_score": train_metrics["f1_score"],
-                    "train_iou": train_metrics["iou"],
                     "val_loss": val_metrics["total_loss"],
                     "val_bce_loss": val_metrics["bce_loss"],
                     "val_dice_loss": val_metrics["dice_loss"],
                     "val_dice": val_metrics["dice"],
                     "val_f1_score": val_metrics["f1_score"],
-                    "val_iou": val_metrics["iou"],
                     "val_precision": val_metrics["precision"],
                     "val_recall": val_metrics["recall"],
                     "lr": lr,
@@ -945,7 +942,6 @@ def main() -> None:
                 "dice_loss": test_metrics["dice_loss"],
                 "dice": test_metrics["dice"],
                 "f1_score": test_metrics["f1_score"],
-                "iou": test_metrics["iou"],
                 "precision": test_metrics["precision"],
                 "recall": test_metrics["recall"],
                 "specificity": test_metrics["specificity"],

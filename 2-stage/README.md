@@ -8,7 +8,7 @@
 - `dataset.py` — чтение `splits.json`, `manifest.csv`, проверка путей и загрузка `.npy`.
 - `model.py` — 2D U-Net.
 - `losses.py` — `BCEWithLogitsLoss + DiceLoss`.
-- `metrics.py` — Dice/F1, IoU, Precision, Recall.
+- `metrics.py` — Dice/F1, Precision, Recall.
 - `utils_logging.py` — логи, CSV/JSON/YAML, run-директории.
 - `inference.py` — инференс одного `.npy`-среза.
 - `Dockerfile`, `docker-compose.yml`, `requirements.txt`, `config.yaml` — Docker-запуск.
