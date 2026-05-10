@@ -1,0 +1,13 @@
+.git
+.idea
+__pycache__
+*.pyc
+.pytest_cache
+outputs
+preprocessed_npy
+imagesTr
+labelsTr
+*.nii
+*.nii.gz
+*.pth
+*.pt

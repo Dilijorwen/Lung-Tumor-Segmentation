@@ -1,0 +1,19 @@
+services:
+  train:
+    build: .
+    image: lung-unet-ddp:latest
+    container_name: lung-unet-ddp-train
+    gpus: all
+    ipc: host
+    shm_size: "16gb"
+    volumes:
+      - /server/path/preprocessed_npy:/workspace/data/preprocessed_npy:ro
+      - /server/path/outputs:/workspace/outputs
+    command: >
+      torchrun --nproc_per_node=4 train_ddp.py
+      --data-dir /workspace/data/preprocessed_npy
+      --output-dir /workspace/outputs
+      --epochs 100
+      --batch-size-per-gpu 8
+      --lr 1e-4
+      --img-size 512
