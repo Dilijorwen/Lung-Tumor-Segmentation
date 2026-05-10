@@ -315,6 +315,68 @@ def inspect_npy_samples(
     return info
 
 
+def compute_mask_pixel_statistics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    positive_pixels = 0
+    total_pixels = 0
+
+    for row in rows:
+        mask = np.load(row["_mask_path"], allow_pickle=False)
+        mask = _as_chw_float32(mask, "mask") > 0.5
+        positive_pixels += int(mask.sum())
+        total_pixels += int(mask.size)
+
+    negative_pixels = total_pixels - positive_pixels
+    positive_fraction = positive_pixels / max(total_pixels, 1)
+    raw_pos_weight = negative_pixels / max(positive_pixels, 1)
+    return {
+        "slices": len(rows),
+        "total_pixels": total_pixels,
+        "positive_pixels": positive_pixels,
+        "negative_pixels": negative_pixels,
+        "positive_fraction": positive_fraction,
+        "raw_pos_weight": raw_pos_weight,
+    }
+
+
+def _apply_train_augmentations(
+    image: np.ndarray,
+    mask: np.ndarray,
+    config: dict[str, Any],
+) -> tuple[np.ndarray, np.ndarray]:
+    if np.random.random() < float(config.get("horizontal_flip_p", 0.0)):
+        image = np.flip(image, axis=2)
+        mask = np.flip(mask, axis=2)
+
+    if np.random.random() < float(config.get("vertical_flip_p", 0.0)):
+        image = np.flip(image, axis=1)
+        mask = np.flip(mask, axis=1)
+
+    if np.random.random() < float(config.get("rotate90_p", 0.0)):
+        k = int(np.random.randint(1, 4))
+        image = np.rot90(image, k=k, axes=(1, 2))
+        mask = np.rot90(mask, k=k, axes=(1, 2))
+
+    intensity_scale = float(config.get("intensity_scale", 0.0))
+    if intensity_scale > 0:
+        scale = np.random.uniform(1.0 - intensity_scale, 1.0 + intensity_scale)
+        image = image * np.float32(scale)
+
+    intensity_shift = float(config.get("intensity_shift", 0.0))
+    if intensity_shift > 0:
+        shift = np.random.uniform(-intensity_shift, intensity_shift)
+        image = image + np.float32(shift)
+
+    noise_std = float(config.get("gaussian_noise_std", 0.0))
+    if noise_std > 0:
+        noise = np.random.normal(0.0, noise_std, size=image.shape).astype(np.float32)
+        image = image + noise
+
+    if bool(config.get("clip_image", True)):
+        image = np.clip(image, 0.0, 1.0)
+
+    return image, mask
+
+
 class LungTumorNpyDataset(Dataset):
     def __init__(
         self,
@@ -322,6 +384,8 @@ class LungTumorNpyDataset(Dataset):
         data_dir: str | Path,
         img_size: int = 512,
         validate_files: bool = False,
+        augment: bool = False,
+        augmentation_config: dict[str, Any] | None = None,
     ) -> None:
         if rows and "_image_path" not in rows[0]:
             rows, _ = prepare_manifest_rows(
@@ -331,6 +395,8 @@ class LungTumorNpyDataset(Dataset):
             )
         self.rows = rows
         self.img_size = int(img_size)
+        self.augment = bool(augment)
+        self.augmentation_config = augmentation_config or {}
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -354,6 +420,13 @@ class LungTumorNpyDataset(Dataset):
             raise ValueError(
                 f"Mask {row['_mask_path']} has shape {mask.shape}, "
                 f"expected {expected_shape}"
+            )
+
+        if self.augment:
+            image, mask = _apply_train_augmentations(
+                image,
+                mask,
+                self.augmentation_config,
             )
 
         z_value = _to_int(row["z"])

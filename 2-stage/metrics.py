@@ -2,12 +2,11 @@ import torch
 
 
 @torch.no_grad()
-def confusion_from_logits(
-    logits: torch.Tensor,
+def confusion_from_probabilities(
+    probs: torch.Tensor,
     targets: torch.Tensor,
     threshold: float = 0.5,
 ) -> torch.Tensor:
-    probs = torch.sigmoid(logits)
     preds = probs >= threshold
     target = targets >= 0.5
 
@@ -16,6 +15,19 @@ def confusion_from_logits(
     fn = (~preds & target).sum(dtype=torch.float64)
     tn = (~preds & ~target).sum(dtype=torch.float64)
     return torch.stack([tp, fp, fn, tn])
+
+
+@torch.no_grad()
+def confusion_from_logits(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    threshold: float = 0.5,
+) -> torch.Tensor:
+    return confusion_from_probabilities(
+        torch.sigmoid(logits),
+        targets,
+        threshold=threshold,
+    )
 
 
 def metrics_from_confusion(

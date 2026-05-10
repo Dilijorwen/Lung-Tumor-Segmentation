@@ -18,6 +18,7 @@ from tqdm import tqdm
 from dataset import (
     DistributedEvalSampler,
     LungTumorNpyDataset,
+    compute_mask_pixel_statistics,
     compute_split_statistics,
     inspect_npy_samples,
     load_manifest,
@@ -26,7 +27,7 @@ from dataset import (
     split_rows,
 )
 from losses import BCEDiceLoss
-from metrics import confusion_from_logits, metrics_from_confusion
+from metrics import confusion_from_probabilities, metrics_from_confusion
 from model import build_model
 from utils_logging import (
     create_run_directories,
@@ -67,6 +68,19 @@ def default_config() -> dict[str, Any]:
             "dice_weight": 1.0,
             "dice_smooth": 1.0,
             "pos_weight": None,
+            "auto_pos_weight": True,
+            "pos_weight_max": 20.0,
+            "pos_weight_min": 1.0,
+        },
+        "augmentation": {
+            "enabled": True,
+            "horizontal_flip_p": 0.5,
+            "vertical_flip_p": 0.0,
+            "rotate90_p": 0.0,
+            "intensity_scale": 0.10,
+            "intensity_shift": 0.05,
+            "gaussian_noise_std": 0.01,
+            "clip_image": True,
         },
         "training": {
             "epochs": 100,
@@ -84,6 +98,7 @@ def default_config() -> dict[str, Any]:
         },
         "metrics": {
             "threshold": 0.5,
+            "threshold_candidates": [0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70],
         },
         "ddp": {
             "backend": "nccl",
@@ -126,6 +141,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--base-channels", type=int, default=None)
     parser.add_argument("--threshold", type=float, default=None)
+    parser.add_argument(
+        "--threshold-candidates",
+        type=str,
+        default=None,
+        help="Comma-separated validation thresholds, for example 0.1,0.2,0.3,0.4,0.5.",
+    )
     parser.add_argument("--scheduler", choices=["none", "cosine", "plateau"], default=None)
     parser.add_argument("--grad-clip-norm", type=float, default=None)
     parser.add_argument("--resume", type=str, default=None)
@@ -197,9 +218,74 @@ def build_effective_config(args: argparse.Namespace) -> dict[str, Any]:
         if args.epochs is None:
             cfg["training"]["epochs"] = 1
 
+    if args.threshold_candidates is not None:
+        cfg["metrics"]["threshold_candidates"] = [
+            float(value.strip())
+            for value in args.threshold_candidates.split(",")
+            if value.strip()
+        ]
+
     if str(cfg["training"]["scheduler"]).lower() == "none":
         cfg["training"]["scheduler"] = None
     return cfg
+
+
+def get_threshold_candidates(cfg: dict[str, Any]) -> list[float]:
+    values = cfg["metrics"].get("threshold_candidates", [])
+    if values is None:
+        return []
+    if isinstance(values, str):
+        values = [value.strip() for value in values.split(",") if value.strip()]
+    thresholds = sorted({float(value) for value in values})
+    primary_threshold = float(cfg["metrics"].get("threshold", 0.5))
+    if thresholds and primary_threshold not in thresholds:
+        thresholds.append(primary_threshold)
+        thresholds = sorted(set(thresholds))
+    for threshold in thresholds:
+        if threshold <= 0.0 or threshold >= 1.0:
+            raise ValueError(
+                "All threshold candidates must be between 0 and 1, "
+                f"got {threshold}"
+            )
+    return thresholds
+
+
+def maybe_configure_auto_pos_weight(
+    cfg: dict[str, Any],
+    train_rows: list[dict[str, Any]],
+    is_main: bool,
+) -> dict[str, Any] | None:
+    if not bool(cfg["loss"].get("auto_pos_weight", False)):
+        return None
+    if cfg["loss"].get("pos_weight") is not None:
+        return {
+            "mode": "manual",
+            "used_pos_weight": float(cfg["loss"]["pos_weight"]),
+        }
+
+    payload: list[dict[str, Any] | None] = [None]
+    if is_main:
+        stats = compute_mask_pixel_statistics(train_rows)
+        min_weight = float(cfg["loss"].get("pos_weight_min", 1.0))
+        max_weight = float(cfg["loss"].get("pos_weight_max", 20.0))
+        raw_weight = float(stats["raw_pos_weight"])
+        used_weight = min(max(raw_weight, min_weight), max_weight)
+        stats["mode"] = "auto"
+        stats["pos_weight_min"] = min_weight
+        stats["pos_weight_max"] = max_weight
+        stats["used_pos_weight"] = used_weight
+        stats["pos_weight_was_clipped"] = used_weight != raw_weight
+        payload[0] = stats
+
+    if distributed_is_initialized():
+        dist.broadcast_object_list(payload, src=0)
+
+    stats = payload[0]
+    if stats is None:
+        raise RuntimeError("Failed to compute automatic pos_weight.")
+    cfg["loss"]["pos_weight"] = float(stats["used_pos_weight"])
+    cfg["loss"]["auto_pos_weight_stats"] = stats
+    return stats
 
 
 def resolve_run_group(cfg: dict[str, Any], world_size: int) -> str:
@@ -283,7 +369,7 @@ def build_loader(
     device: torch.device,
     sampler=None,
     shuffle: bool = False,
-    seed: int = 42,
+    seed: int = 2004,
     rank: int = 0,
 ) -> DataLoader:
     kwargs: dict[str, Any] = {
@@ -349,6 +435,35 @@ def tracker_to_metrics(tracker: torch.Tensor) -> dict[str, float]:
     return metrics
 
 
+def reduce_threshold_tracker(
+    threshold_tracker: torch.Tensor,
+    threshold_candidates: list[float],
+) -> dict[str, Any]:
+    if distributed_is_initialized():
+        dist.all_reduce(threshold_tracker, op=dist.ReduceOp.SUM)
+
+    threshold_metrics: dict[str, dict[str, float]] = {}
+    best_threshold = float(threshold_candidates[0])
+    best_metrics: dict[str, float] | None = None
+
+    for index, threshold in enumerate(threshold_candidates):
+        metrics = metrics_from_confusion(threshold_tracker[index])
+        threshold_metrics[f"{threshold:.3f}"] = metrics
+        if best_metrics is None or metrics["dice"] > best_metrics["dice"]:
+            best_threshold = float(threshold)
+            best_metrics = metrics
+
+    assert best_metrics is not None
+    return {
+        "threshold_metrics": threshold_metrics,
+        "best_threshold": best_threshold,
+        "best_dice": best_metrics["dice"],
+        "best_f1_score": best_metrics["f1_score"],
+        "best_precision": best_metrics["precision"],
+        "best_recall": best_metrics["recall"],
+    }
+
+
 def run_epoch(
     model: torch.nn.Module,
     loader: DataLoader,
@@ -361,10 +476,18 @@ def run_epoch(
     rank: int,
     description: str,
     grad_clip_norm: float = 0.0,
+    threshold_candidates: list[float] | None = None,
 ) -> dict[str, float]:
     is_train = optimizer is not None
     model.train(is_train)
     tracker = torch.zeros(8, dtype=torch.float64, device=device)
+    threshold_tracker = None
+    if threshold_candidates:
+        threshold_tracker = torch.zeros(
+            (len(threshold_candidates), 4),
+            dtype=torch.float64,
+            device=device,
+        )
 
     iterator = tqdm(
         loader,
@@ -400,11 +523,21 @@ def run_epoch(
                 scaler.step(optimizer)
                 scaler.update()
 
-        confusion = confusion_from_logits(
-            logits.detach(),
-            masks.detach(),
+        probabilities = torch.sigmoid(logits.detach())
+        masks_detached = masks.detach()
+        confusion = confusion_from_probabilities(
+            probabilities,
+            masks_detached,
             threshold=threshold,
         ).to(device=device)
+
+        if threshold_tracker is not None:
+            for threshold_index, threshold_candidate in enumerate(threshold_candidates):
+                threshold_tracker[threshold_index] += confusion_from_probabilities(
+                    probabilities,
+                    masks_detached,
+                    threshold=threshold_candidate,
+                ).to(device=device)
 
         tracker[0] += float(loss_items["total_loss"].item()) * batch_size
         tracker[1] += float(loss_items["bce_loss"].item()) * batch_size
@@ -418,7 +551,15 @@ def run_epoch(
                 dice=f"{metrics_from_confusion(confusion)['dice']:.4f}",
             )
 
-    return tracker_to_metrics(tracker)
+    metrics = tracker_to_metrics(tracker)
+    if threshold_tracker is not None and threshold_candidates:
+        metrics.update(
+            reduce_threshold_tracker(
+                threshold_tracker=threshold_tracker,
+                threshold_candidates=threshold_candidates,
+            )
+        )
+    return metrics
 
 
 def get_peak_gpu_memory_gb(device: torch.device) -> float:
@@ -442,6 +583,7 @@ def save_checkpoint(
     scaler: torch.cuda.amp.GradScaler,
     epoch: int,
     best_val_dice: float,
+    best_threshold: float,
     config: dict[str, Any],
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -450,6 +592,7 @@ def save_checkpoint(
         "optimizer_state_dict": optimizer.state_dict(),
         "epoch": int(epoch),
         "best_val_dice": float(best_val_dice),
+        "best_threshold": float(best_threshold),
         "config": config,
     }
     if scheduler is not None:
@@ -466,15 +609,25 @@ def load_checkpoint(path: str | Path, map_location: torch.device) -> dict[str, A
 
 
 def format_epoch_metrics(prefix: str, metrics: dict[str, float]) -> str:
-    return (
-        f"{prefix}_loss={metrics['total_loss']:.6f}, "
-        f"{prefix}_bce_loss={metrics['bce_loss']:.6f}, "
-        f"{prefix}_dice_loss={metrics['dice_loss']:.6f}, "
-        f"{prefix}_dice={metrics['dice']:.6f}, "
-        f"{prefix}_f1={metrics['f1_score']:.6f}, "
-        f"{prefix}_precision={metrics['precision']:.6f}, "
-        f"{prefix}_recall={metrics['recall']:.6f}"
-    )
+    parts = [
+        f"{prefix}_loss={metrics['total_loss']:.6f}",
+        f"{prefix}_bce_loss={metrics['bce_loss']:.6f}",
+        f"{prefix}_dice_loss={metrics['dice_loss']:.6f}",
+        f"{prefix}_dice={metrics['dice']:.6f}",
+        f"{prefix}_f1={metrics['f1_score']:.6f}",
+        f"{prefix}_precision={metrics['precision']:.6f}",
+        f"{prefix}_recall={metrics['recall']:.6f}",
+    ]
+    if "best_dice" in metrics:
+        parts.extend(
+            [
+                f"{prefix}_best_dice={metrics['best_dice']:.6f}",
+                f"{prefix}_best_threshold={metrics['best_threshold']:.3f}",
+                f"{prefix}_best_precision={metrics['best_precision']:.6f}",
+                f"{prefix}_best_recall={metrics['best_recall']:.6f}",
+            ]
+        )
+    return ", ".join(parts)
 
 
 def main() -> None:
@@ -577,7 +730,6 @@ def main() -> None:
 
         if is_main:
             print(f"Run directory: {run_dir}", flush=True)
-            save_yaml(cfg, run_dir / "config.yaml")
 
         splits = load_splits(data_dir)
         manifest_rows = load_manifest(data_dir)
@@ -597,8 +749,20 @@ def main() -> None:
             rows_by_split,
             img_size=int(cfg["data"]["img_size"]),
         )
+        auto_pos_weight_stats = maybe_configure_auto_pos_weight(
+            cfg=cfg,
+            train_rows=rows_by_split["train"],
+            is_main=is_main,
+        )
+        if auto_pos_weight_stats is not None:
+            split_stats["train_pixel_statistics"] = auto_pos_weight_stats
+
+        threshold = float(cfg["metrics"]["threshold"])
+        threshold_candidates = get_threshold_candidates(cfg)
+        cfg["metrics"]["threshold_candidates"] = threshold_candidates
 
         if is_main:
+            save_yaml(cfg, run_dir / "config.yaml")
             data_logger.info("data_dir: %s", data_dir)
             data_logger.info("manifest_path: %s", data_dir / "manifest.csv")
             data_logger.info("splits_path: %s", data_dir / "splits.json")
@@ -611,6 +775,8 @@ def main() -> None:
             rows_by_split["train"],
             data_dir=data_dir,
             img_size=int(cfg["data"]["img_size"]),
+            augment=bool(cfg["augmentation"].get("enabled", False)),
+            augmentation_config=cfg["augmentation"],
         )
         val_dataset = LungTumorNpyDataset(
             rows_by_split["val"],
@@ -719,6 +885,7 @@ def main() -> None:
 
         start_epoch = 1
         best_val_dice = -1.0
+        best_threshold = threshold
         resume_path = cfg["training"].get("resume")
         if resume_path:
             checkpoint = load_checkpoint(resume_path, map_location=device)
@@ -730,6 +897,7 @@ def main() -> None:
                 scaler.load_state_dict(checkpoint["scaler_state_dict"])
             start_epoch = int(checkpoint["epoch"]) + 1
             best_val_dice = float(checkpoint.get("best_val_dice", -1.0))
+            best_threshold = float(checkpoint.get("best_threshold", threshold))
 
         if is_main:
             hyperparameters = {
@@ -747,12 +915,15 @@ def main() -> None:
                 "mixed_precision": cfg["training"]["mixed_precision"],
                 "ddp_world_size": world_size,
                 "run_group": run_group,
+                "augmentation": cfg["augmentation"],
+                "loss": cfg["loss"],
+                "threshold": threshold,
+                "threshold_candidates": threshold_candidates,
             }
             log_dict(hyper_logger, hyperparameters, title="hyperparameters")
 
         history: list[dict[str, Any]] = []
         epochs = int(cfg["training"]["epochs"])
-        threshold = float(cfg["metrics"]["threshold"])
         grad_clip_norm = float(cfg["training"].get("grad_clip_norm", 0.0))
         best_model_metrics: dict[str, Any] | None = None
 
@@ -787,11 +958,17 @@ def main() -> None:
                 threshold=threshold,
                 rank=rank,
                 description=f"epoch {epoch}/{epochs} val",
+                threshold_candidates=threshold_candidates,
+            )
+
+            selection_dice = float(val_metrics.get("best_dice", val_metrics["dice"]))
+            selection_threshold = float(
+                val_metrics.get("best_threshold", threshold)
             )
 
             if scheduler is not None:
                 if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-                    scheduler.step(val_metrics["dice"])
+                    scheduler.step(selection_dice)
                 else:
                     scheduler.step()
 
@@ -799,9 +976,10 @@ def main() -> None:
             lr = float(optimizer.param_groups[0]["lr"])
             gpu_memory_gb = get_peak_gpu_memory_gb(device)
 
-            is_best = val_metrics["dice"] > best_val_dice
+            is_best = selection_dice > best_val_dice
             if is_best:
-                best_val_dice = val_metrics["dice"]
+                best_val_dice = selection_dice
+                best_threshold = selection_threshold
 
             if is_main:
                 training_logger.info(
@@ -828,6 +1006,7 @@ def main() -> None:
                     scaler=scaler,
                     epoch=epoch,
                     best_val_dice=best_val_dice,
+                    best_threshold=best_threshold,
                     config=cfg,
                 )
                 row = {
@@ -842,6 +1021,10 @@ def main() -> None:
                     "val_dice_loss": val_metrics["dice_loss"],
                     "val_dice": val_metrics["dice"],
                     "val_f1_score": val_metrics["f1_score"],
+                    "val_best_dice": val_metrics.get("best_dice"),
+                    "val_best_threshold": val_metrics.get("best_threshold"),
+                    "val_best_precision": val_metrics.get("best_precision"),
+                    "val_best_recall": val_metrics.get("best_recall"),
                     "val_precision": val_metrics["precision"],
                     "val_recall": val_metrics["recall"],
                     "lr": lr,
@@ -862,12 +1045,14 @@ def main() -> None:
                         scaler=scaler,
                         epoch=epoch,
                         best_val_dice=best_val_dice,
+                        best_threshold=best_threshold,
                         config=cfg,
                     )
                     best_model_metrics = {
                         "checkpoint_path": str(best_checkpoint_path),
                         "epoch": epoch,
                         "best_val_dice": best_val_dice,
+                        "best_threshold": best_threshold,
                         "train": train_metrics,
                         "validation": val_metrics,
                         "lr": lr,
@@ -881,11 +1066,12 @@ def main() -> None:
                     )
                     best_model_logger.info(
                         "saved_best_model | epoch=%d | checkpoint_path=%s | "
-                        "best_val_dice=%.6f | %s | %s | lr=%.8g | "
+                        "best_val_dice=%.6f | best_threshold=%.3f | %s | %s | lr=%.8g | "
                         "epoch_time_sec=%.2f | gpu_memory_gb=%.3f",
                         epoch,
                         best_checkpoint_path,
                         best_val_dice,
+                        best_threshold,
                         format_epoch_metrics("train", train_metrics),
                         format_epoch_metrics("val", val_metrics),
                         lr,
@@ -902,6 +1088,7 @@ def main() -> None:
         best_checkpoint_path = checkpoints_dir / "best_model.pth"
         best_checkpoint = load_checkpoint(best_checkpoint_path, map_location=device)
         unwrap_model(model).load_state_dict(best_checkpoint["model_state_dict"])
+        test_threshold = float(best_checkpoint.get("best_threshold", best_threshold))
 
         test_metrics = run_epoch(
             model=model,
@@ -911,7 +1098,7 @@ def main() -> None:
             optimizer=None,
             scaler=scaler,
             mixed_precision=bool(cfg["training"]["mixed_precision"]),
-            threshold=threshold,
+            threshold=test_threshold,
             rank=rank,
             description="test",
         )
@@ -924,18 +1111,22 @@ def main() -> None:
                     "checkpoint_path": str(best_checkpoint_path),
                     "epoch": int(best_checkpoint.get("epoch", 0)),
                     "best_val_dice": float(best_checkpoint.get("best_val_dice", 0.0)),
+                    "best_threshold": test_threshold,
                     "run_group": run_group,
                 }
             best_model_metrics["test"] = test_metrics
+            best_model_metrics["test_threshold"] = test_threshold
             save_json(best_model_metrics, metrics_dir / "best_model_metrics.json")
             best_model_logger.info(
-                "test_evaluation | checkpoint_path=%s | %s",
+                "test_evaluation | checkpoint_path=%s | threshold=%.3f | %s",
                 best_checkpoint_path,
+                test_threshold,
                 format_epoch_metrics("test", test_metrics),
             )
             test_output = {
                 "checkpoint_path": str(best_checkpoint_path),
                 "best_model": best_model_metrics,
+                "threshold": test_threshold,
                 "total_loss": test_metrics["total_loss"],
                 "loss": test_metrics["total_loss"],
                 "bce_loss": test_metrics["bce_loss"],

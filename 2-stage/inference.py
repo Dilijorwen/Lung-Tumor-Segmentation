@@ -16,7 +16,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input", required=True, type=str, help="Path to input .npy slice.")
     parser.add_argument("--output-mask", default=None, type=str)
     parser.add_argument("--output-prob", default=None, type=str)
-    parser.add_argument("--threshold", default=0.5, type=float)
+    parser.add_argument(
+        "--threshold",
+        default=None,
+        type=float,
+        help="Override probability threshold. Defaults to checkpoint best_threshold.",
+    )
     parser.add_argument("--device", default=None, type=str)
     parser.add_argument("--img-size", default=None, type=int)
     return parser.parse_args()
@@ -65,6 +70,16 @@ def main() -> None:
         },
     )
     img_size = args.img_size or int(config.get("data", {}).get("img_size", 512))
+    threshold = (
+        float(args.threshold)
+        if args.threshold is not None
+        else float(
+            checkpoint.get(
+                "best_threshold",
+                config.get("metrics", {}).get("threshold", 0.5),
+            )
+        )
+    )
 
     image = np.load(args.input, allow_pickle=False)
     image = as_chw_float32(image)
@@ -81,7 +96,7 @@ def main() -> None:
         logits = model(tensor)
         prob = torch.sigmoid(logits)[0, 0].detach().cpu().numpy().astype(np.float32)
 
-    mask = (prob >= float(args.threshold)).astype(np.uint8)
+    mask = (prob >= threshold).astype(np.uint8)
 
     input_path = Path(args.input)
     output_mask = Path(args.output_mask) if args.output_mask else input_path.with_name(
@@ -97,6 +112,7 @@ def main() -> None:
 
     print(f"Saved mask: {output_mask}")
     print(f"Saved probability map: {output_prob}")
+    print(f"Threshold: {threshold}")
 
 
 if __name__ == "__main__":

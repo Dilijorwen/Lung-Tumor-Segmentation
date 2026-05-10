@@ -22,6 +22,19 @@ loss:
   dice_weight: 1.0
   dice_smooth: 1.0
   pos_weight: null
+  auto_pos_weight: true
+  pos_weight_max: 20.0
+  pos_weight_min: 1.0
+
+augmentation:
+  enabled: true
+  horizontal_flip_p: 0.5
+  vertical_flip_p: 0.0
+  rotate90_p: 0.0
+  intensity_scale: 0.10
+  intensity_shift: 0.05
+  gaussian_noise_std: 0.01
+  clip_image: true
 
 training:
   epochs: 100
@@ -39,6 +52,14 @@ training:
 
 metrics:
   threshold: 0.5
+  threshold_candidates:
+    - 0.10
+    - 0.20
+    - 0.30
+    - 0.40
+    - 0.50
+    - 0.60
+    - 0.70
 
 ddp:
   backend: nccl

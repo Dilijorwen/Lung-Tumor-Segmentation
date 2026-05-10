@@ -24,6 +24,8 @@
 - `inference.py` — инференс одного `.npy`-среза через `best_model.pth`.
 - `Dockerfile`, `docker-compose.yml`, `requirements.txt`, `config.yaml` — контейнерный запуск.
 
+В `2-stage` включены улучшения обучения без изменения U-Net: train-аугментации, автоматический `pos_weight` для BCE по пиксельному дисбалансу train masks и подбор лучшего порога по validation Dice.
+
 Запуск обучения:
 
 ```bash

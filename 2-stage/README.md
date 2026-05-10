@@ -13,6 +13,13 @@
 - `inference.py` — инференс одного `.npy`-среза.
 - `Dockerfile`, `docker-compose.yml`, `requirements.txt`, `config.yaml` — Docker-запуск.
 
+Архитектура U-Net не меняется. Улучшения обучения вынесены в training pipeline:
+
+- train-аугментации: horizontal flip, brightness/contrast shift, gaussian noise;
+- автоматический `pos_weight` для BCE, рассчитанный по train masks и ограниченный `pos_weight_max`;
+- подбор лучшего threshold по validation Dice, сохранение `best_threshold` в checkpoint;
+- inference по умолчанию использует `best_threshold` из checkpoint.
+
 ## Запуск
 
 ```bash
