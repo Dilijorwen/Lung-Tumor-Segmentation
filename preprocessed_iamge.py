@@ -10,9 +10,6 @@ import torch.nn.functional as F
 from sklearn.model_selection import train_test_split
 
 
-# =========================
-# 1. НАСТРОЙКИ
-# =========================
 
 DATA_DIR = Path(".")
 IMAGES_DIR = DATA_DIR / "imagesTr"
@@ -34,17 +31,10 @@ TRAIN_NEGATIVE_RATIO = 1.0
 SAVE_ALL_VAL_TEST_SLICES = True
 
 
-# =========================
-# 2. SEED
-# =========================
 
 random.seed(SEED)
 np.random.seed(SEED)
 
-
-# =========================
-# 3. ФУНКЦИИ
-# =========================
 
 def get_nifti_files(folder: Path):
     return sorted([
@@ -218,9 +208,6 @@ def save_patient_slices(
     return rows
 
 
-# =========================
-# 4. ПОИСК ПАР IMAGE/MASK
-# =========================
 
 image_files = get_nifti_files(IMAGES_DIR)
 mask_files = get_nifti_files(MASKS_DIR)
@@ -238,9 +225,6 @@ if len(volume_pairs) == 0:
     raise RuntimeError("Не найдены пары imagesTr + labelsTr")
 
 
-# =========================
-# 5. TRAIN / VAL / TEST ПО ПАЦИЕНТАМ
-# =========================
 
 train_pairs, temp_pairs = train_test_split(
     volume_pairs,
@@ -261,9 +245,6 @@ print("Val patients:", len(val_pairs))
 print("Test patients:", len(test_pairs))
 
 
-# =========================
-# 6. СОХРАНЕНИЕ SPLIT
-# =========================
 
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -288,9 +269,6 @@ with open(OUT_DIR / "splits.json", "w", encoding="utf-8") as f:
     json.dump(splits, f, ensure_ascii=False, indent=4)
 
 
-# =========================
-# 7. СОХРАНЕНИЕ .NPY ПО ПАПКАМ ПАЦИЕНТОВ
-# =========================
 
 all_rows = []
 
@@ -310,9 +288,6 @@ for split_name, pairs in [
         all_rows.extend(rows)
 
 
-# =========================
-# 8. MANIFEST CSV
-# =========================
 
 manifest_path = OUT_DIR / "manifest.csv"
 
@@ -332,10 +307,6 @@ with open(manifest_path, "w", newline="", encoding="utf-8") as f:
     writer.writeheader()
     writer.writerows(all_rows)
 
-
-# =========================
-# 9. СТАТИСТИКА
-# =========================
 
 def count_rows(split_name):
     return [r for r in all_rows if r["split"] == split_name]
