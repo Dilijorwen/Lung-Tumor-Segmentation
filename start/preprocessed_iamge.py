@@ -18,7 +18,7 @@ MASKS_DIR = DATA_DIR / "labelsTr"
 OUT_DIR = DATA_DIR / "preprocessed_npy"
 
 IMG_SIZE = 512
-SEED = 42
+SEED = 2004
 
 TRAIN_SIZE = 0.70
 VAL_SIZE = 0.15
