@@ -75,7 +75,6 @@ docker compose -f 2-stage/docker-compose.yml up --build
 - `logs/errors.log`
 - `checkpoints/best_model.pth`
 - `checkpoints/last_model.pth`
-- `checkpoints/epoch_XXXX.pth`
 - `metrics/history.csv`
 - `metrics/history.json`
 - `metrics/test_metrics.json`

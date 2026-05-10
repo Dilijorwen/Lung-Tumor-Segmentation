@@ -6,7 +6,6 @@ data:
 output:
   output_dir: ../outputs
   run_name: null
-  checkpoint_every: 1
 
 model:
   name: UNet2D

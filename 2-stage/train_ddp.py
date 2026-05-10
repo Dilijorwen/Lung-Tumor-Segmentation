@@ -51,7 +51,6 @@ def default_config() -> dict[str, Any]:
         "output": {
             "output_dir": "outputs",
             "run_name": None,
-            "checkpoint_every": 1,
         },
         "model": {
             "name": "UNet2D",
@@ -116,7 +115,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-channels", type=int, default=None)
     parser.add_argument("--threshold", type=float, default=None)
     parser.add_argument("--scheduler", choices=["none", "cosine", "plateau"], default=None)
-    parser.add_argument("--checkpoint-every", type=int, default=None)
     parser.add_argument("--grad-clip-norm", type=float, default=None)
     parser.add_argument("--resume", type=str, default=None)
 
@@ -164,7 +162,6 @@ def build_effective_config(args: argparse.Namespace) -> dict[str, Any]:
         ("data", "img_size"): args.img_size,
         ("output", "output_dir"): args.output_dir,
         ("output", "run_name"): args.run_name,
-        ("output", "checkpoint_every"): args.checkpoint_every,
         ("model", "base_channels"): args.base_channels,
         ("training", "epochs"): args.epochs,
         ("training", "batch_size_per_gpu"): args.batch_size_per_gpu,
@@ -719,7 +716,6 @@ def main() -> None:
         epochs = int(cfg["training"]["epochs"])
         threshold = float(cfg["metrics"]["threshold"])
         grad_clip_norm = float(cfg["training"].get("grad_clip_norm", 0.0))
-        checkpoint_every = int(cfg["output"].get("checkpoint_every", 1))
 
         for epoch in range(start_epoch, epochs + 1):
             if train_sampler is not None:
@@ -795,17 +791,6 @@ def main() -> None:
                     best_val_dice=best_val_dice,
                     config=cfg,
                 )
-                if checkpoint_every > 0 and epoch % checkpoint_every == 0:
-                    save_checkpoint(
-                        checkpoints_dir / f"epoch_{epoch:04d}.pth",
-                        model=model,
-                        optimizer=optimizer,
-                        scheduler=scheduler,
-                        scaler=scaler,
-                        epoch=epoch,
-                        best_val_dice=best_val_dice,
-                        config=cfg,
-                    )
                 if is_best:
                     save_checkpoint(
                         checkpoints_dir / "best_model.pth",
