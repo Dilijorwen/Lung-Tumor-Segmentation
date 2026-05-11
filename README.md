@@ -4,10 +4,10 @@
 
 ## 1-stage: preprocessing
 
-Папка `start/` содержит существующий код подготовки данных:
+Папка `1-stage/` содержит код подготовки данных:
 
-- `start/preprocessed_iamge.py` — разбиение пациентов, windowing HU, resize до `512x512`, сохранение `.npy`, `splits.json`, `manifest.csv`.
-- `start/check.py` — визуальная проверка подготовленных срезов и масок.
+- `1-stage/preprocessed_iamge.py` — разбиение пациентов, windowing HU, resize до `512x512`, сохранение `.npy`, `splits.json`, `manifest.csv`.
+- `1-stage/check.py` — визуальная проверка подготовленных срезов и масок.
 
 Результат этапа: `preprocessed_npy/` с `manifest.csv`, `splits.json` и `.npy`-срезами.
 
@@ -95,4 +95,18 @@ python 2-stage/inference.py \
   --input preprocessed_npy/test/lung_001/images/z0000.npy \
   --output-mask pred_mask.npy \
   --output-prob pred_prob.npy
+```
+
+## 3-stage: local visualization
+
+Папка `3-stage/` содержит Jupyter notebook для локального просмотра предсказаний `best_model.pth` на `.npy`-срезах. Notebook показывает CT, ground truth, predicted mask и probability map, а также сохраняет PNG, `.npy`-маску, `.npy`-probability map и JSON-summary.
+
+Запуск:
+
+```bash
+python3 -m venv .venv-3stage
+source .venv-3stage/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r 3-stage/requirements.txt
+jupyter notebook 3-stage/visualize_prediction.ipynb
 ```
