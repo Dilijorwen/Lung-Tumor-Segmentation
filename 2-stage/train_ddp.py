@@ -16,6 +16,7 @@ from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
 from dataset import (
+    BalancedPositiveNegativeSampler,
     DistributedEvalSampler,
     LungTumorNpyDataset,
     compute_mask_pixel_statistics,
@@ -28,7 +29,7 @@ from dataset import (
 )
 from losses import BCEDiceLoss
 from metrics import confusion_from_probabilities, metrics_from_confusion
-from model import build_model
+from model import build_model, model_output_name
 from utils_logging import (
     create_run_directories,
     log_dict,
@@ -55,22 +56,38 @@ def default_config() -> dict[str, Any]:
             "run_type": "auto",
         },
         "model": {
-            "name": "UNet2D",
+            "name": "SMPUnet",
+            "architecture": "unet",
+            "library": "segmentation_models_pytorch",
+            "encoder_name": "resnet34",
+            "encoder_weights": None,
+            "encoder_depth": 5,
             "in_channels": 1,
             "out_channels": 1,
-            "base_channels": 32,
-            "bilinear": False,
+            "decoder_channels": [256, 128, 64, 32, 16],
+            "decoder_use_batchnorm": True,
+            "decoder_attention_type": None,
             "sync_batchnorm": False,
         },
         "loss": {
-            "name": "BCEWithLogitsLoss + DiceLoss",
+            "name": "BCEWithLogitsLoss + DiceLoss + FocalTverskyLoss",
             "bce_weight": 1.0,
             "dice_weight": 1.0,
             "dice_smooth": 1.0,
+            "tversky_weight": 0.0,
+            "focal_tversky_weight": 0.5,
+            "tversky_alpha": 0.3,
+            "tversky_beta": 0.7,
+            "focal_tversky_gamma": 0.75,
             "pos_weight": None,
             "auto_pos_weight": True,
             "pos_weight_max": 20.0,
             "pos_weight_min": 1.0,
+        },
+        "sampling": {
+            "balanced_train": True,
+            "positive_fraction": 0.5,
+            "samples_per_epoch": None,
         },
         "augmentation": {
             "enabled": True,
@@ -98,7 +115,26 @@ def default_config() -> dict[str, Any]:
         },
         "metrics": {
             "threshold": 0.5,
-            "threshold_candidates": [0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70],
+            "threshold_candidates": [
+                0.05,
+                0.10,
+                0.15,
+                0.20,
+                0.25,
+                0.30,
+                0.35,
+                0.40,
+                0.45,
+                0.50,
+                0.55,
+                0.60,
+                0.65,
+                0.70,
+                0.75,
+                0.80,
+                0.85,
+                0.90,
+            ],
         },
         "ddp": {
             "backend": "nccl",
@@ -139,7 +175,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--img-size", type=int, default=None)
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--base-channels", type=int, default=None)
+    parser.add_argument(
+        "--model-architecture",
+        choices=[
+            "unet",
+            "unet++",
+            "unetplusplus",
+            "unet_attention",
+            "unet-attention",
+            "attention_unet",
+            "attention-unet",
+        ],
+        default=None,
+        help="Library model architecture: unet, unet++, or unet_attention.",
+    )
+    parser.add_argument("--encoder-name", type=str, default=None)
+    parser.add_argument(
+        "--encoder-weights",
+        type=str,
+        default=None,
+        help="SMP encoder weights, for example imagenet. Use none/null for random init.",
+    )
+    parser.add_argument(
+        "--base-channels",
+        type=int,
+        default=None,
+        help="Legacy UNet2D only. Ignored by SMPUnet.",
+    )
     parser.add_argument("--threshold", type=float, default=None)
     parser.add_argument(
         "--threshold-candidates",
@@ -150,6 +212,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scheduler", choices=["none", "cosine", "plateau"], default=None)
     parser.add_argument("--grad-clip-norm", type=float, default=None)
     parser.add_argument("--resume", type=str, default=None)
+    parser.add_argument("--positive-fraction", type=float, default=None)
+    parser.add_argument("--samples-per-epoch", type=int, default=None)
+    parser.add_argument(
+        "--balanced-sampling",
+        dest="balanced_sampling",
+        action="store_true",
+        default=None,
+    )
+    parser.add_argument(
+        "--no-balanced-sampling",
+        dest="balanced_sampling",
+        action="store_false",
+    )
+    parser.add_argument("--focal-tversky-weight", type=float, default=None)
+    parser.add_argument("--tversky-beta", type=float, default=None)
 
     amp_group = parser.add_mutually_exclusive_group()
     amp_group.add_argument("--amp", dest="mixed_precision", action="store_true")
@@ -196,6 +273,9 @@ def build_effective_config(args: argparse.Namespace) -> dict[str, Any]:
         ("output", "output_dir"): args.output_dir,
         ("output", "run_name"): args.run_name,
         ("output", "run_type"): args.run_type,
+        ("model", "architecture"): args.model_architecture,
+        ("model", "encoder_name"): args.encoder_name,
+        ("model", "encoder_weights"): args.encoder_weights,
         ("model", "base_channels"): args.base_channels,
         ("training", "epochs"): args.epochs,
         ("training", "batch_size_per_gpu"): args.batch_size_per_gpu,
@@ -208,6 +288,11 @@ def build_effective_config(args: argparse.Namespace) -> dict[str, Any]:
         ("training", "grad_clip_norm"): args.grad_clip_norm,
         ("training", "resume"): args.resume,
         ("metrics", "threshold"): args.threshold,
+        ("sampling", "balanced_train"): args.balanced_sampling,
+        ("sampling", "positive_fraction"): args.positive_fraction,
+        ("sampling", "samples_per_epoch"): args.samples_per_epoch,
+        ("loss", "focal_tversky_weight"): args.focal_tversky_weight,
+        ("loss", "tversky_beta"): args.tversky_beta,
     }
     for (section, key), value in overrides.items():
         if value is not None:
@@ -224,6 +309,28 @@ def build_effective_config(args: argparse.Namespace) -> dict[str, Any]:
             for value in args.threshold_candidates.split(",")
             if value.strip()
         ]
+
+    if args.model_architecture is not None:
+        architecture = model_output_name({"architecture": args.model_architecture})
+        if architecture != "unet_attention":
+            cfg["model"]["decoder_attention_type"] = None
+    else:
+        architecture = model_output_name(cfg["model"])
+    cfg["model"]["architecture"] = architecture
+    if architecture == "unet++":
+        cfg["model"]["name"] = "SMPUnetPlusPlus"
+        cfg["model"]["library"] = "segmentation_models_pytorch"
+    elif architecture == "unet_attention":
+        cfg["model"]["name"] = "SMPAttentionUnet"
+        cfg["model"]["library"] = "segmentation_models_pytorch"
+        if cfg["model"].get("decoder_attention_type") is None:
+            cfg["model"]["decoder_attention_type"] = "scse"
+    elif architecture == "unet":
+        cfg["model"]["name"] = "SMPUnet"
+        cfg["model"]["library"] = "segmentation_models_pytorch"
+    elif architecture == "unet2d":
+        cfg["model"]["name"] = "UNet2D"
+        cfg["model"]["library"] = "legacy"
 
     if str(cfg["training"]["scheduler"]).lower() == "none":
         cfg["training"]["scheduler"] = None
@@ -297,6 +404,10 @@ def resolve_run_group(cfg: dict[str, Any], world_size: int) -> str:
 
     epochs = int(cfg["training"]["epochs"])
     return "test" if epochs <= 1 and world_size == 1 else "train"
+
+
+def resolve_model_group(cfg: dict[str, Any]) -> str:
+    return model_output_name(cfg["model"])
 
 
 def distributed_is_initialized() -> bool:
@@ -421,15 +532,17 @@ def tracker_to_metrics(tracker: torch.Tensor) -> dict[str, float]:
     if distributed_is_initialized():
         dist.all_reduce(tracker, op=dist.ReduceOp.SUM)
 
-    sample_count = max(float(tracker[3].item()), 1.0)
-    confusion = tracker[4:8]
+    sample_count = max(float(tracker[5].item()), 1.0)
+    confusion = tracker[6:10]
     metrics = metrics_from_confusion(confusion)
     metrics.update(
         {
             "total_loss": float(tracker[0].item() / sample_count),
             "bce_loss": float(tracker[1].item() / sample_count),
             "dice_loss": float(tracker[2].item() / sample_count),
-            "samples": int(tracker[3].item()),
+            "tversky_loss": float(tracker[3].item() / sample_count),
+            "focal_tversky_loss": float(tracker[4].item() / sample_count),
+            "samples": int(tracker[5].item()),
         }
     )
     return metrics
@@ -480,7 +593,7 @@ def run_epoch(
 ) -> dict[str, float]:
     is_train = optimizer is not None
     model.train(is_train)
-    tracker = torch.zeros(8, dtype=torch.float64, device=device)
+    tracker = torch.zeros(10, dtype=torch.float64, device=device)
     threshold_tracker = None
     if threshold_candidates:
         threshold_tracker = torch.zeros(
@@ -542,8 +655,10 @@ def run_epoch(
         tracker[0] += float(loss_items["total_loss"].item()) * batch_size
         tracker[1] += float(loss_items["bce_loss"].item()) * batch_size
         tracker[2] += float(loss_items["dice_loss"].item()) * batch_size
-        tracker[3] += batch_size
-        tracker[4:8] += confusion
+        tracker[3] += float(loss_items["tversky_loss"].item()) * batch_size
+        tracker[4] += float(loss_items["focal_tversky_loss"].item()) * batch_size
+        tracker[5] += batch_size
+        tracker[6:10] += confusion
 
         if rank == 0:
             iterator.set_postfix(
@@ -613,6 +728,8 @@ def format_epoch_metrics(prefix: str, metrics: dict[str, float]) -> str:
         f"{prefix}_loss={metrics['total_loss']:.6f}",
         f"{prefix}_bce_loss={metrics['bce_loss']:.6f}",
         f"{prefix}_dice_loss={metrics['dice_loss']:.6f}",
+        f"{prefix}_tversky_loss={metrics['tversky_loss']:.6f}",
+        f"{prefix}_focal_tversky_loss={metrics['focal_tversky_loss']:.6f}",
         f"{prefix}_dice={metrics['dice']:.6f}",
         f"{prefix}_f1={metrics['f1_score']:.6f}",
         f"{prefix}_precision={metrics['precision']:.6f}",
@@ -646,13 +763,16 @@ def main() -> None:
 
         seed_everything(int(cfg["training"]["seed"]), rank=rank)
         run_group = resolve_run_group(cfg, world_size)
+        model_group = resolve_model_group(cfg)
         cfg["output"]["run_type"] = run_group
+        cfg["output"]["model_group"] = model_group
 
         if is_main:
             run_dirs = create_run_directories(
                 cfg["output"]["output_dir"],
                 cfg["output"].get("run_name"),
                 run_group=run_group,
+                model_group=model_group,
             )
             run_dir_str = str(run_dirs["run_dir"])
         else:
@@ -726,6 +846,7 @@ def main() -> None:
             "device": str(device),
             "total_batch_size": int(cfg["training"]["batch_size_per_gpu"]) * world_size,
             "run_group": run_group,
+            "model_group": model_group,
         }
 
         if is_main:
@@ -789,7 +910,18 @@ def main() -> None:
             img_size=int(cfg["data"]["img_size"]),
         )
 
-        if dist_info["distributed"]:
+        sampling_cfg = cfg.get("sampling", {})
+        if bool(sampling_cfg.get("balanced_train", False)):
+            train_sampler = BalancedPositiveNegativeSampler(
+                train_dataset,
+                positive_fraction=float(sampling_cfg.get("positive_fraction", 0.5)),
+                samples_per_epoch=sampling_cfg.get("samples_per_epoch"),
+                num_replicas=world_size,
+                rank=rank,
+                seed=int(cfg["training"]["seed"]),
+            )
+            train_sampling_stats = train_sampler.statistics()
+        elif dist_info["distributed"]:
             train_sampler = DistributedSampler(
                 train_dataset,
                 num_replicas=world_size,
@@ -798,6 +930,18 @@ def main() -> None:
                 seed=int(cfg["training"]["seed"]),
                 drop_last=False,
             )
+            train_sampling_stats = {
+                "enabled": False,
+                "sampler": "DistributedSampler",
+            }
+        else:
+            train_sampler = None
+            train_sampling_stats = {
+                "enabled": False,
+                "sampler": "DataLoader shuffle",
+            }
+
+        if dist_info["distributed"]:
             val_sampler = DistributedEvalSampler(
                 val_dataset,
                 num_replicas=world_size,
@@ -809,9 +953,11 @@ def main() -> None:
                 rank=rank,
             )
         else:
-            train_sampler = None
             val_sampler = None
             test_sampler = None
+
+        if is_main:
+            log_dict(data_logger, train_sampling_stats, title="train sampling")
 
         batch_size = int(cfg["training"]["batch_size_per_gpu"])
         num_workers = int(cfg["training"]["num_workers"])
@@ -871,6 +1017,15 @@ def main() -> None:
             dice_weight=float(cfg["loss"]["dice_weight"]),
             dice_smooth=float(cfg["loss"]["dice_smooth"]),
             pos_weight=cfg["loss"].get("pos_weight"),
+            tversky_weight=float(cfg["loss"].get("tversky_weight", 0.0)),
+            focal_tversky_weight=float(
+                cfg["loss"].get("focal_tversky_weight", 0.0)
+            ),
+            tversky_alpha=float(cfg["loss"].get("tversky_alpha", 0.3)),
+            tversky_beta=float(cfg["loss"].get("tversky_beta", 0.7)),
+            focal_tversky_gamma=float(
+                cfg["loss"].get("focal_tversky_gamma", 0.75)
+            ),
         ).to(device)
 
         optimizer = torch.optim.AdamW(
@@ -915,7 +1070,9 @@ def main() -> None:
                 "mixed_precision": cfg["training"]["mixed_precision"],
                 "ddp_world_size": world_size,
                 "run_group": run_group,
+                "model_group": model_group,
                 "augmentation": cfg["augmentation"],
+                "sampling": cfg.get("sampling", {}),
                 "loss": cfg["loss"],
                 "threshold": threshold,
                 "threshold_candidates": threshold_candidates,
@@ -1014,11 +1171,15 @@ def main() -> None:
                     "train_loss": train_metrics["total_loss"],
                     "train_bce_loss": train_metrics["bce_loss"],
                     "train_dice_loss": train_metrics["dice_loss"],
+                    "train_tversky_loss": train_metrics["tversky_loss"],
+                    "train_focal_tversky_loss": train_metrics["focal_tversky_loss"],
                     "train_dice": train_metrics["dice"],
                     "train_f1_score": train_metrics["f1_score"],
                     "val_loss": val_metrics["total_loss"],
                     "val_bce_loss": val_metrics["bce_loss"],
                     "val_dice_loss": val_metrics["dice_loss"],
+                    "val_tversky_loss": val_metrics["tversky_loss"],
+                    "val_focal_tversky_loss": val_metrics["focal_tversky_loss"],
                     "val_dice": val_metrics["dice"],
                     "val_f1_score": val_metrics["f1_score"],
                     "val_best_dice": val_metrics.get("best_dice"),
@@ -1059,6 +1220,7 @@ def main() -> None:
                         "epoch_time_sec": epoch_time,
                         "gpu_memory_gb": gpu_memory_gb,
                         "run_group": run_group,
+                        "model_group": model_group,
                     }
                     save_json(
                         best_model_metrics,
@@ -1112,7 +1274,8 @@ def main() -> None:
                     "epoch": int(best_checkpoint.get("epoch", 0)),
                     "best_val_dice": float(best_checkpoint.get("best_val_dice", 0.0)),
                     "best_threshold": test_threshold,
-                    "run_group": run_group,
+                   "run_group": run_group,
+                    "model_group": model_group,
                 }
             best_model_metrics["test"] = test_metrics
             best_model_metrics["test_threshold"] = test_threshold
@@ -1131,6 +1294,8 @@ def main() -> None:
                 "loss": test_metrics["total_loss"],
                 "bce_loss": test_metrics["bce_loss"],
                 "dice_loss": test_metrics["dice_loss"],
+                "tversky_loss": test_metrics["tversky_loss"],
+                "focal_tversky_loss": test_metrics["focal_tversky_loss"],
                 "dice": test_metrics["dice"],
                 "f1_score": test_metrics["f1_score"],
                 "precision": test_metrics["precision"],

@@ -17,14 +17,14 @@
 
 - `train_ddp.py` — DDP-обучение через `torchrun`, validation/test, чекпоинты, логи.
 - `dataset.py` — чтение `manifest.csv` и загрузка `.npy`.
-- `model.py` — 2D U-Net.
+- `model.py` — библиотечный 2D U-Net через `segmentation_models_pytorch` с legacy-совместимостью для старых checkpoint.
 - `losses.py` — `BCEWithLogitsLoss + DiceLoss`.
 - `metrics.py` — Dice/F1, Precision, Recall.
 - `utils_logging.py` — run-директории, отдельные log-файлы, JSON/YAML/CSV.
 - `inference.py` — инференс одного `.npy`-среза через `best_model.pth`.
-- `Dockerfile`, `docker-compose.yml`, `requirements.txt`, `config.yaml` — контейнерный запуск.
+- `Dockerfile`, `docker-compose.yml`, `requirements.txt`, `config.yaml`, `config_unetplusplus.yaml`, `config_attention_unet.yaml` — контейнерный запуск.
 
-В `2-stage` включены улучшения обучения без изменения U-Net: train-аугментации, автоматический `pos_weight` для BCE по пиксельному дисбалансу train masks и подбор лучшего порога по validation Dice.
+В `2-stage` используется библиотечный U-Net через `segmentation_models_pytorch`: обычный `Unet`, `UnetPlusPlus` и Attention U-Net на базе `Unet` с `decoder_attention_type: scse`. Все варианты используют `resnet34` encoder без pretrained weights, чтобы запуск не требовал скачивания весов. Для борьбы с дисбалансом включены balanced positive/negative sampling, `BCE + Dice + FocalTversky`, автоматический `pos_weight` для BCE и подбор лучшего порога по validation Dice.
 
 Запуск обучения:
 
@@ -38,7 +38,48 @@ torchrun --nproc_per_node=4 2-stage/train_ddp.py \
   --img-size 512
 ```
 
+Запуск U-Net++:
+
+```bash
+torchrun --nproc_per_node=4 2-stage/train_ddp.py \
+  --config 2-stage/config_unetplusplus.yaml \
+  --data-dir /workspace/data/preprocessed_npy \
+  --output-dir /workspace/outputs \
+  --epochs 100 \
+  --batch-size-per-gpu 8 \
+  --lr 1e-4 \
+  --img-size 512
+```
+
+Запуск Attention U-Net:
+
+```bash
+torchrun --nproc_per_node=4 2-stage/train_ddp.py \
+  --config 2-stage/config_attention_unet.yaml \
+  --data-dir /workspace/data/preprocessed_npy \
+  --output-dir /workspace/outputs \
+  --epochs 100 \
+  --batch-size-per-gpu 8 \
+  --lr 1e-4 \
+  --img-size 512
+```
+
 `--batch-size-per-gpu` означает batch size на один процесс/GPU. При 4 GPU и значении `8` полный batch size равен `32`.
+
+Ключевые параметры улучшенного обучения:
+
+```bash
+--positive-fraction 0.5
+--focal-tversky-weight 0.5
+--tversky-beta 0.7
+--threshold-candidates 0.05,0.10,0.15,0.20,0.25,0.30,0.35,0.40,0.45,0.50,0.55,0.60,0.65,0.70,0.75,0.80,0.85,0.90
+```
+
+Balanced sampling можно отключить:
+
+```bash
+--no-balanced-sampling
+```
 
 ## Docker
 
@@ -67,9 +108,9 @@ docker compose -f 2-stage/docker-compose.yml up --build
 
 ## Артефакты обучения
 
-Каждый запуск пишет отдельную директорию `outputs/<тип>/run_YYYYMMDD_HHMMSS/`:
+Каждый запуск пишет отдельную директорию `outputs/<тип>/<модель>/run_YYYYMMDD_HHMMSS/`:
 
-Полное обучение сохраняется в `outputs/train/run_YYYYMMDD_HHMMSS/`, smoke/debug запуск на 1 эпоху и 1 GPU автоматически сохраняется в `outputs/test/run_YYYYMMDD_HHMMSS/`.
+Полное обучение U-Net сохраняется в `outputs/train/unet/run_YYYYMMDD_HHMMSS/`, U-Net++ — в `outputs/train/unet++/run_YYYYMMDD_HHMMSS/`, Attention U-Net — в `outputs/train/unet_attention/run_YYYYMMDD_HHMMSS/`. Smoke/debug запуск на 1 эпоху и 1 GPU автоматически сохраняется в `outputs/test/<модель>/run_YYYYMMDD_HHMMSS/`.
 
 - `logs/data_loading.log`
 - `logs/hyperparameters.log`
@@ -91,7 +132,7 @@ docker compose -f 2-stage/docker-compose.yml up --build
 
 ```bash
 python 2-stage/inference.py \
-  --checkpoint outputs/train/run_YYYYMMDD_HHMMSS/checkpoints/best_model.pth \
+  --checkpoint outputs/train/unet/run_YYYYMMDD_HHMMSS/checkpoints/best_model.pth \
   --input preprocessed_npy/test/lung_001/images/z0000.npy \
   --output-mask pred_mask.npy \
   --output-prob pred_prob.npy

@@ -12,14 +12,18 @@ def create_run_directories(
     output_dir: str | Path,
     run_name: str | None = None,
     run_group: str | None = None,
+    model_group: str | None = None,
 ) -> dict[str, Path]:
     output_dir = Path(output_dir).expanduser().resolve(strict=False)
     if run_name is None:
         run_name = datetime.now().strftime("run_%Y%m%d_%H%M%S")
-    if run_group is None:
-        run_dir = output_dir / run_name
-    else:
-        run_dir = output_dir / run_group / run_name
+    path_parts = [output_dir]
+    if run_group is not None:
+        path_parts.append(Path(run_group))
+    if model_group is not None:
+        path_parts.append(Path(model_group))
+    path_parts.append(Path(run_name))
+    run_dir = Path(*path_parts)
 
     dirs = {
         "run_dir": run_dir,
@@ -98,11 +102,15 @@ def write_history_csv(rows: list[dict[str, Any]], path: str | Path) -> None:
         "train_loss",
         "train_bce_loss",
         "train_dice_loss",
+        "train_tversky_loss",
+        "train_focal_tversky_loss",
         "train_dice",
         "train_f1_score",
         "val_loss",
         "val_bce_loss",
         "val_dice_loss",
+        "val_tversky_loss",
+        "val_focal_tversky_loss",
         "val_dice",
         "val_f1_score",
         "val_best_dice",

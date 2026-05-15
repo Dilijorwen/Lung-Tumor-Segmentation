@@ -63,10 +63,16 @@ def main() -> None:
     model_config = config.get(
         "model",
         {
+            "name": "SMPUnet",
+            "library": "segmentation_models_pytorch",
+            "encoder_name": "resnet34",
+            "encoder_weights": None,
+            "encoder_depth": 5,
             "in_channels": 1,
             "out_channels": 1,
-            "base_channels": 32,
-            "bilinear": False,
+            "decoder_channels": [256, 128, 64, 32, 16],
+            "decoder_use_batchnorm": True,
+            "decoder_attention_type": None,
         },
     )
     img_size = args.img_size or int(config.get("data", {}).get("img_size", 512))

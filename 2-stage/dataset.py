@@ -5,7 +5,7 @@ from typing import Any
 
 import numpy as np
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 from torch.utils.data.distributed import DistributedSampler
 
 
@@ -439,6 +439,98 @@ class LungTumorNpyDataset(Dataset):
             "has_tumor": has_tumor,
             "image_path": row["_image_path"],
             "mask_path": row["_mask_path"],
+        }
+
+
+class BalancedPositiveNegativeSampler(Sampler[int]):
+    """Samples train slices with a fixed positive/negative ratio, DDP-aware."""
+
+    def __init__(
+        self,
+        dataset: LungTumorNpyDataset,
+        positive_fraction: float = 0.5,
+        samples_per_epoch: int | None = None,
+        num_replicas: int = 1,
+        rank: int = 0,
+        seed: int = 0,
+    ) -> None:
+        if not 0.0 <= float(positive_fraction) <= 1.0:
+            raise ValueError("positive_fraction must be in [0, 1]")
+        if num_replicas <= 0:
+            raise ValueError("num_replicas must be positive")
+        if rank < 0 or rank >= num_replicas:
+            raise ValueError("rank must be in [0, num_replicas)")
+
+        self.dataset = dataset
+        self.positive_fraction = float(positive_fraction)
+        self.rank = int(rank)
+        self.num_replicas = int(num_replicas)
+        self.seed = int(seed)
+        self.epoch = 0
+
+        labels = [_to_int(row["has_tumor"]) for row in dataset.rows]
+        self.positive_indices = [idx for idx, label in enumerate(labels) if label == 1]
+        self.negative_indices = [idx for idx, label in enumerate(labels) if label == 0]
+
+        requested_total = len(dataset) if samples_per_epoch is None else int(samples_per_epoch)
+        if requested_total <= 0:
+            raise ValueError("samples_per_epoch must be positive")
+        self.num_samples = int(np.ceil(requested_total / self.num_replicas))
+        self.total_size = self.num_samples * self.num_replicas
+
+    def __iter__(self):
+        generator = torch.Generator()
+        generator.manual_seed(self.seed + self.epoch)
+
+        if self.positive_indices and self.negative_indices:
+            positive_count = int(round(self.total_size * self.positive_fraction))
+            negative_count = self.total_size - positive_count
+        elif self.positive_indices:
+            positive_count = self.total_size
+            negative_count = 0
+        elif self.negative_indices:
+            positive_count = 0
+            negative_count = self.total_size
+        else:
+            return iter([])
+
+        indices: list[int] = []
+        if positive_count > 0:
+            selected = torch.randint(
+                low=0,
+                high=len(self.positive_indices),
+                size=(positive_count,),
+                generator=generator,
+            ).tolist()
+            indices.extend(self.positive_indices[idx] for idx in selected)
+        if negative_count > 0:
+            selected = torch.randint(
+                low=0,
+                high=len(self.negative_indices),
+                size=(negative_count,),
+                generator=generator,
+            ).tolist()
+            indices.extend(self.negative_indices[idx] for idx in selected)
+
+        order = torch.randperm(len(indices), generator=generator).tolist()
+        shuffled = [indices[idx] for idx in order]
+        return iter(shuffled[self.rank : self.total_size : self.num_replicas])
+
+    def __len__(self) -> int:
+        return self.num_samples
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
+
+    def statistics(self) -> dict[str, Any]:
+        return {
+            "enabled": True,
+            "positive_fraction": self.positive_fraction,
+            "positive_slices": len(self.positive_indices),
+            "negative_slices": len(self.negative_indices),
+            "samples_per_epoch_total": self.total_size,
+            "samples_per_epoch_per_rank": self.num_samples,
+            "num_replicas": self.num_replicas,
         }
 
 
