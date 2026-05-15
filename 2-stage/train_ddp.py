@@ -138,6 +138,7 @@ def default_config() -> dict[str, Any]:
         },
         "ddp": {
             "backend": "nccl",
+            "find_unused_parameters": False,
         },
     }
 
@@ -1002,15 +1003,23 @@ def main() -> None:
         model = model.to(device)
 
         if dist_info["distributed"]:
+            find_unused_parameters = bool(
+                cfg.get("ddp", {}).get("find_unused_parameters", False)
+            )
             if device.type == "cuda":
                 model = DistributedDataParallel(
                     model,
                     device_ids=[local_rank],
                     output_device=local_rank,
                     broadcast_buffers=False,
+                    find_unused_parameters=find_unused_parameters,
                 )
             else:
-                model = DistributedDataParallel(model, broadcast_buffers=False)
+                model = DistributedDataParallel(
+                    model,
+                    broadcast_buffers=False,
+                    find_unused_parameters=find_unused_parameters,
+                )
 
         criterion = BCEDiceLoss(
             bce_weight=float(cfg["loss"]["bce_weight"]),

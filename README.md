@@ -24,7 +24,7 @@
 - `inference.py` — инференс одного `.npy`-среза через `best_model.pth`.
 - `Dockerfile`, `docker-compose.yml`, `requirements.txt`, `config.yaml`, `config_unetplusplus.yaml`, `config_attention_unet.yaml` — контейнерный запуск.
 
-В `2-stage` используется библиотечный U-Net через `segmentation_models_pytorch`: обычный `Unet`, `UnetPlusPlus` и Attention U-Net на базе `Unet` с `decoder_attention_type: scse`. Все варианты используют `resnet34` encoder без pretrained weights, чтобы запуск не требовал скачивания весов. Для борьбы с дисбалансом включены balanced positive/negative sampling, `BCE + Dice + FocalTversky`, автоматический `pos_weight` для BCE и подбор лучшего порога по validation Dice.
+В `2-stage` используется библиотечный U-Net через `segmentation_models_pytorch`: обычный `Unet`, `UnetPlusPlus` и Attention U-Net на базе `Unet` с `decoder_attention_type: scse`. Для Attention U-Net включён `ddp.find_unused_parameters`, чтобы DDP корректно работал с attention-блоками SMP. Все варианты используют `resnet34` encoder без pretrained weights, чтобы запуск не требовал скачивания весов. Для борьбы с дисбалансом включены balanced positive/negative sampling, `BCE + Dice + FocalTversky`, автоматический `pos_weight` для BCE и подбор лучшего порога по validation Dice.
 
 Запуск обучения:
 

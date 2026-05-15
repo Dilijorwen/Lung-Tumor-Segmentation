@@ -31,6 +31,7 @@ Attention U-Net задаётся в `config_attention_unet.yaml` как `SMPAtte
 
 - `segmentation_models_pytorch.Unet`;
 - `decoder_attention_type: scse`;
+- `ddp.find_unused_parameters: true`, потому что attention-блоки SMP могут оставлять часть параметров без gradient на отдельных итерациях;
 - тот же `resnet34` encoder;
 - те же вход/выход: `[1, 512, 512] -> [1, 512, 512]`.
 
