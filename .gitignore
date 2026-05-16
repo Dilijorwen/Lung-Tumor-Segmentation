@@ -221,6 +221,10 @@ ipython_config.py
 
 # Training artifacts
 outputs/
+preprocessed_npy/
+prepared_npy/
+*.tar
+*.tar.gz
 *.pth
 *.pt
 

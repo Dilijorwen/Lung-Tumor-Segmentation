@@ -5,7 +5,7 @@ from typing import Any
 
 import numpy as np
 import torch
-from torch.utils.data import Dataset, Sampler
+from torch.utils.data import Dataset
 from torch.utils.data.distributed import DistributedSampler
 
 
@@ -273,9 +273,14 @@ def _as_chw_float32(array: np.ndarray, name: str) -> np.ndarray:
     return array.astype(np.float32, copy=False)
 
 
+def as_chw_float32(array: np.ndarray, name: str = "array") -> np.ndarray:
+    return _as_chw_float32(array=array, name=name)
+
+
 def inspect_npy_samples(
     rows_by_split: dict[str, list[dict[str, Any]]],
-    img_size: int | None,
+    img_size: int | None = None,
+    img_sizes_by_split: dict[str, int | None] | None = None,
 ) -> dict[str, Any]:
     info: dict[str, Any] = {}
     for split, rows in rows_by_split.items():
@@ -289,8 +294,13 @@ def inspect_npy_samples(
         image_chw = _as_chw_float32(image, "image")
         mask_chw = _as_chw_float32(mask, "mask")
 
-        if img_size is not None:
-            expected = (1, int(img_size), int(img_size))
+        expected_size = (
+            img_sizes_by_split.get(split, img_size)
+            if img_sizes_by_split is not None
+            else img_size
+        )
+        if expected_size is not None:
+            expected = (1, int(expected_size), int(expected_size))
             if tuple(image_chw.shape) != expected:
                 raise ValueError(
                     f"Unexpected image shape for {row['_image_path']}: "
@@ -338,45 +348,6 @@ def compute_mask_pixel_statistics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _apply_train_augmentations(
-    image: np.ndarray,
-    mask: np.ndarray,
-    config: dict[str, Any],
-) -> tuple[np.ndarray, np.ndarray]:
-    if np.random.random() < float(config.get("horizontal_flip_p", 0.0)):
-        image = np.flip(image, axis=2)
-        mask = np.flip(mask, axis=2)
-
-    if np.random.random() < float(config.get("vertical_flip_p", 0.0)):
-        image = np.flip(image, axis=1)
-        mask = np.flip(mask, axis=1)
-
-    if np.random.random() < float(config.get("rotate90_p", 0.0)):
-        k = int(np.random.randint(1, 4))
-        image = np.rot90(image, k=k, axes=(1, 2))
-        mask = np.rot90(mask, k=k, axes=(1, 2))
-
-    intensity_scale = float(config.get("intensity_scale", 0.0))
-    if intensity_scale > 0:
-        scale = np.random.uniform(1.0 - intensity_scale, 1.0 + intensity_scale)
-        image = image * np.float32(scale)
-
-    intensity_shift = float(config.get("intensity_shift", 0.0))
-    if intensity_shift > 0:
-        shift = np.random.uniform(-intensity_shift, intensity_shift)
-        image = image + np.float32(shift)
-
-    noise_std = float(config.get("gaussian_noise_std", 0.0))
-    if noise_std > 0:
-        noise = np.random.normal(0.0, noise_std, size=image.shape).astype(np.float32)
-        image = image + noise
-
-    if bool(config.get("clip_image", True)):
-        image = np.clip(image, 0.0, 1.0)
-
-    return image, mask
-
-
 class LungTumorNpyDataset(Dataset):
     def __init__(
         self,
@@ -384,8 +355,6 @@ class LungTumorNpyDataset(Dataset):
         data_dir: str | Path,
         img_size: int = 512,
         validate_files: bool = False,
-        augment: bool = False,
-        augmentation_config: dict[str, Any] | None = None,
     ) -> None:
         if rows and "_image_path" not in rows[0]:
             rows, _ = prepare_manifest_rows(
@@ -395,8 +364,6 @@ class LungTumorNpyDataset(Dataset):
             )
         self.rows = rows
         self.img_size = int(img_size)
-        self.augment = bool(augment)
-        self.augmentation_config = augmentation_config or {}
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -422,13 +389,6 @@ class LungTumorNpyDataset(Dataset):
                 f"expected {expected_shape}"
             )
 
-        if self.augment:
-            image, mask = _apply_train_augmentations(
-                image,
-                mask,
-                self.augmentation_config,
-            )
-
         z_value = _to_int(row["z"])
         has_tumor = _to_int(row["has_tumor"])
         return {
@@ -439,98 +399,6 @@ class LungTumorNpyDataset(Dataset):
             "has_tumor": has_tumor,
             "image_path": row["_image_path"],
             "mask_path": row["_mask_path"],
-        }
-
-
-class BalancedPositiveNegativeSampler(Sampler[int]):
-    """Samples train slices with a fixed positive/negative ratio, DDP-aware."""
-
-    def __init__(
-        self,
-        dataset: LungTumorNpyDataset,
-        positive_fraction: float = 0.5,
-        samples_per_epoch: int | None = None,
-        num_replicas: int = 1,
-        rank: int = 0,
-        seed: int = 0,
-    ) -> None:
-        if not 0.0 <= float(positive_fraction) <= 1.0:
-            raise ValueError("positive_fraction must be in [0, 1]")
-        if num_replicas <= 0:
-            raise ValueError("num_replicas must be positive")
-        if rank < 0 or rank >= num_replicas:
-            raise ValueError("rank must be in [0, num_replicas)")
-
-        self.dataset = dataset
-        self.positive_fraction = float(positive_fraction)
-        self.rank = int(rank)
-        self.num_replicas = int(num_replicas)
-        self.seed = int(seed)
-        self.epoch = 0
-
-        labels = [_to_int(row["has_tumor"]) for row in dataset.rows]
-        self.positive_indices = [idx for idx, label in enumerate(labels) if label == 1]
-        self.negative_indices = [idx for idx, label in enumerate(labels) if label == 0]
-
-        requested_total = len(dataset) if samples_per_epoch is None else int(samples_per_epoch)
-        if requested_total <= 0:
-            raise ValueError("samples_per_epoch must be positive")
-        self.num_samples = int(np.ceil(requested_total / self.num_replicas))
-        self.total_size = self.num_samples * self.num_replicas
-
-    def __iter__(self):
-        generator = torch.Generator()
-        generator.manual_seed(self.seed + self.epoch)
-
-        if self.positive_indices and self.negative_indices:
-            positive_count = int(round(self.total_size * self.positive_fraction))
-            negative_count = self.total_size - positive_count
-        elif self.positive_indices:
-            positive_count = self.total_size
-            negative_count = 0
-        elif self.negative_indices:
-            positive_count = 0
-            negative_count = self.total_size
-        else:
-            return iter([])
-
-        indices: list[int] = []
-        if positive_count > 0:
-            selected = torch.randint(
-                low=0,
-                high=len(self.positive_indices),
-                size=(positive_count,),
-                generator=generator,
-            ).tolist()
-            indices.extend(self.positive_indices[idx] for idx in selected)
-        if negative_count > 0:
-            selected = torch.randint(
-                low=0,
-                high=len(self.negative_indices),
-                size=(negative_count,),
-                generator=generator,
-            ).tolist()
-            indices.extend(self.negative_indices[idx] for idx in selected)
-
-        order = torch.randperm(len(indices), generator=generator).tolist()
-        shuffled = [indices[idx] for idx in order]
-        return iter(shuffled[self.rank : self.total_size : self.num_replicas])
-
-    def __len__(self) -> int:
-        return self.num_samples
-
-    def set_epoch(self, epoch: int) -> None:
-        self.epoch = int(epoch)
-
-    def statistics(self) -> dict[str, Any]:
-        return {
-            "enabled": True,
-            "positive_fraction": self.positive_fraction,
-            "positive_slices": len(self.positive_indices),
-            "negative_slices": len(self.negative_indices),
-            "samples_per_epoch_total": self.total_size,
-            "samples_per_epoch_per_rank": self.num_samples,
-            "num_replicas": self.num_replicas,
         }
 
 

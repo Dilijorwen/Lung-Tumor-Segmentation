@@ -7,9 +7,25 @@
 Папка `1-stage/` содержит код подготовки данных:
 
 - `1-stage/preprocessed_iamge.py` — разбиение пациентов, windowing HU, resize до `512x512`, сохранение `.npy`, `splits.json`, `manifest.csv`.
+- `1-stage/prepare_training_dataset.py` — offline-подготовка train dataset: баланс positive/negative, patch sampling `256x256`, train-аугментации на диск, копирование val/test без изменений.
 - `1-stage/check.py` — визуальная проверка подготовленных срезов и масок.
 
-Результат этапа: `preprocessed_npy/` с `manifest.csv`, `splits.json` и `.npy`-срезами.
+Первый шаг этапа создаёт `preprocessed_npy/` с `manifest.csv`, `splits.json` и `.npy`-срезами.
+
+Второй шаг этапа создаёт `prepared_npy/`, который уже отправляется на сервер и используется обучением:
+
+```bash
+python 1-stage/prepare_training_dataset.py \
+  --data-dir preprocessed_npy \
+  --output-dir prepared_npy \
+  --mode patch \
+  --patch-size 256 \
+  --negative-ratio 1.0 \
+  --augmentations-per-positive 1 \
+  --augmentations-per-negative 1 \
+  --seed 42 \
+  --overwrite
+```
 
 ## 2-stage: training
 
@@ -24,13 +40,15 @@
 - `inference.py` — инференс одного `.npy`-среза через `best_model.pth`.
 - `Dockerfile`, `docker-compose.yml`, `requirements.txt`, `config.yaml`, `config_unetplusplus.yaml`, `config_attention_unet.yaml` — контейнерный запуск.
 
-В `2-stage` используется библиотечный U-Net через `segmentation_models_pytorch`: обычный `Unet`, `UnetPlusPlus` и Attention U-Net на базе `Unet` с `decoder_attention_type: scse`. Для Attention U-Net включён `ddp.find_unused_parameters`, чтобы DDP корректно работал с attention-блоками SMP. Все варианты используют `resnet34` encoder без pretrained weights, чтобы запуск не требовал скачивания весов. Для борьбы с дисбалансом включены balanced positive/negative sampling, `BCE + Dice + FocalTversky`, автоматический `pos_weight` для BCE и подбор лучшего порога по validation Dice.
+В `2-stage` используется библиотечный U-Net через `segmentation_models_pytorch`: обычный `Unet`, `UnetPlusPlus` и Attention U-Net на базе `Unet` с `decoder_attention_type: scse`. Для Attention U-Net включён `ddp.find_unused_parameters`, чтобы DDP корректно работал с attention-блоками SMP. Все варианты используют `resnet34` encoder без pretrained weights.
+
+`2-stage` не делает балансировку, patch sampling или аугментации. Он читает `prepared_npy/`, созданный в `1-stage`.
 
 Запуск обучения:
 
 ```bash
 torchrun --nproc_per_node=4 2-stage/train_ddp.py \
-  --data-dir /workspace/data/preprocessed_npy \
+  --data-dir /workspace/data/prepared_npy \
   --output-dir /workspace/outputs \
   --epochs 100 \
   --batch-size-per-gpu 8 \
@@ -43,7 +61,7 @@ torchrun --nproc_per_node=4 2-stage/train_ddp.py \
 ```bash
 torchrun --nproc_per_node=4 2-stage/train_ddp.py \
   --config 2-stage/config_unetplusplus.yaml \
-  --data-dir /workspace/data/preprocessed_npy \
+  --data-dir /workspace/data/prepared_npy \
   --output-dir /workspace/outputs \
   --epochs 100 \
   --batch-size-per-gpu 8 \
@@ -56,7 +74,7 @@ torchrun --nproc_per_node=4 2-stage/train_ddp.py \
 ```bash
 torchrun --nproc_per_node=4 2-stage/train_ddp.py \
   --config 2-stage/config_attention_unet.yaml \
-  --data-dir /workspace/data/preprocessed_npy \
+  --data-dir /workspace/data/prepared_npy \
   --output-dir /workspace/outputs \
   --epochs 100 \
   --batch-size-per-gpu 8 \
@@ -66,19 +84,12 @@ torchrun --nproc_per_node=4 2-stage/train_ddp.py \
 
 `--batch-size-per-gpu` означает batch size на один процесс/GPU. При 4 GPU и значении `8` полный batch size равен `32`.
 
-Ключевые параметры улучшенного обучения:
+Ключевые параметры обучения:
 
 ```bash
---positive-fraction 0.5
 --focal-tversky-weight 0.5
 --tversky-beta 0.7
 --threshold-candidates 0.05,0.10,0.15,0.20,0.25,0.30,0.35,0.40,0.45,0.50,0.55,0.60,0.65,0.70,0.75,0.80,0.85,0.90
-```
-
-Balanced sampling можно отключить:
-
-```bash
---no-balanced-sampling
 ```
 
 ## Docker
@@ -87,11 +98,11 @@ Balanced sampling можно отключить:
 docker build -t lung-unet-ddp:latest 2-stage
 
 docker run --gpus all --rm -it \
-  -v /server/path/preprocessed_npy:/workspace/data/preprocessed_npy \
+  -v /server/path/prepared_npy:/workspace/data/prepared_npy \
   -v /server/path/outputs:/workspace/outputs \
   lung-unet-ddp:latest \
   torchrun --nproc_per_node=4 train_ddp.py \
-    --data-dir /workspace/data/preprocessed_npy \
+    --data-dir /workspace/data/prepared_npy \
     --output-dir /workspace/outputs \
     --epochs 100 \
     --batch-size-per-gpu 8 \
@@ -104,7 +115,7 @@ Compose-вариант:
 docker compose -f 2-stage/docker-compose.yml up --build
 ```
 
-Перед запуском замените `/server/path/preprocessed_npy` и `/server/path/outputs` в `2-stage/docker-compose.yml` на реальные пути сервера.
+Перед запуском замените `/server/path/prepared_npy` и `/server/path/outputs` в `2-stage/docker-compose.yml` на реальные пути сервера.
 
 ## Артефакты обучения
 

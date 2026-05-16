@@ -7,11 +7,11 @@ services:
     ipc: host
     shm_size: "16gb"
     volumes:
-      - /server/path/preprocessed_npy:/workspace/data/preprocessed_npy:ro
+      - /server/path/prepared_npy:/workspace/data/prepared_npy:ro
       - /server/path/outputs:/workspace/outputs
     command: >
       torchrun --nproc_per_node=4 train_ddp.py
-      --data-dir /workspace/data/preprocessed_npy
+      --data-dir /workspace/data/prepared_npy
       --output-dir /workspace/outputs
       --epochs 100
       --batch-size-per-gpu 8

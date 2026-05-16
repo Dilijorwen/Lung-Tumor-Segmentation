@@ -1,5 +1,5 @@
 data:
-  data_dir: ../preprocessed_npy
+  data_dir: ../prepared_npy
   img_size: 512
   validate_files: true
 
@@ -42,20 +42,14 @@ loss:
   pos_weight_max: 20.0
   pos_weight_min: 1.0
 
-sampling:
-  balanced_train: true
-  positive_fraction: 0.5
-  samples_per_epoch: null
+train:
+  img_size: 256
 
-augmentation:
-  enabled: true
-  horizontal_flip_p: 0.5
-  vertical_flip_p: 0.0
-  rotate90_p: 0.0
-  intensity_scale: 0.10
-  intensity_shift: 0.05
-  gaussian_noise_std: 0.01
-  clip_image: true
+val:
+  img_size: 512
+
+test:
+  img_size: 512
 
 training:
   epochs: 100

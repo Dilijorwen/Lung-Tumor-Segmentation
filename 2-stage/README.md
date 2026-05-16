@@ -25,7 +25,7 @@ U-Net++ задаётся в `config_unetplusplus.yaml` как `SMPUnetPlusPlus`:
 
 - `segmentation_models_pytorch.UnetPlusPlus`;
 - тот же `resnet34` encoder;
-- те же вход/выход: `[1, 512, 512] -> [1, 512, 512]`.
+- train может идти на patch `[1, 256, 256]`, val/test остаются `[1, 512, 512]`.
 
 Attention U-Net задаётся в `config_attention_unet.yaml` как `SMPAttentionUnet`:
 
@@ -33,14 +33,23 @@ Attention U-Net задаётся в `config_attention_unet.yaml` как `SMPAtte
 - `decoder_attention_type: scse`;
 - `ddp.find_unused_parameters: true`, потому что attention-блоки SMP могут оставлять часть параметров без gradient на отдельных итерациях;
 - тот же `resnet34` encoder;
-- те же вход/выход: `[1, 512, 512] -> [1, 512, 512]`.
+- train может идти на patch `[1, 256, 256]`, val/test остаются `[1, 512, 512]`.
 
 Для старых checkpoint сохранена legacy-совместимость: если в checkpoint config указано `model.name: UNet2D`, `build_model` создаст прежнюю самописную U-Net.
 
-Улучшения обучения вынесены в training pipeline:
+Формирование train/val/test делается в `1-stage/prepare_training_dataset.py` до обучения:
 
-- balanced positive/negative sampling train-срезов;
-- train-аугментации: horizontal flip, brightness/contrast shift, gaussian noise;
+- скрипт читает исходный `preprocessed_npy/`;
+- train берётся только из `preprocessed_npy/train`;
+- используются все positive-срезы train и negative-срезы в соотношении `1:1`;
+- train заранее сохраняется в `prepared_npy/train` как patch `256x256`;
+- positive patch центрируется около bounding box опухоли с jitter;
+- negative patch берётся как случайный crop фона;
+- train-аугментации применяются offline и сохраняются на диск;
+- val/test копируются в `prepared_npy/val` и `prepared_npy/test` без аугментаций.
+
+Улучшения обучения в `2-stage`:
+
 - автоматический `pos_weight` для BCE, рассчитанный по train masks и ограниченный `pos_weight_max`;
 - `BCE + Dice + FocalTversky`, где Tversky сильнее штрафует false negatives;
 - подбор лучшего threshold по validation Dice, сохранение `best_threshold` в checkpoint;
@@ -48,9 +57,11 @@ Attention U-Net задаётся в `config_attention_unet.yaml` как `SMPAtte
 
 ## Запуск
 
+Перед запуском `2-stage` должен уже существовать `prepared_npy/`, созданный первым этапом.
+
 ```bash
 torchrun --nproc_per_node=4 train_ddp.py \
-  --data-dir /workspace/data/preprocessed_npy \
+  --data-dir /workspace/data/prepared_npy \
   --output-dir /workspace/outputs \
   --epochs 100 \
   --batch-size-per-gpu 8 \
@@ -72,7 +83,7 @@ U-Net++:
 ```bash
 torchrun --nproc_per_node=4 train_ddp.py \
   --config config_unetplusplus.yaml \
-  --data-dir /workspace/data/preprocessed_npy \
+  --data-dir /workspace/data/prepared_npy \
   --output-dir /workspace/outputs \
   --epochs 100 \
   --batch-size-per-gpu 8 \
@@ -84,7 +95,7 @@ torchrun --nproc_per_node=4 train_ddp.py \
 ```bash
 torchrun --nproc_per_node=4 train_ddp.py \
   --model-architecture unet++ \
-  --data-dir /workspace/data/preprocessed_npy \
+  --data-dir /workspace/data/prepared_npy \
   --output-dir /workspace/outputs \
   --epochs 100 \
   --batch-size-per-gpu 8 \
@@ -96,7 +107,7 @@ Attention U-Net:
 ```bash
 torchrun --nproc_per_node=4 train_ddp.py \
   --config config_attention_unet.yaml \
-  --data-dir /workspace/data/preprocessed_npy \
+  --data-dir /workspace/data/prepared_npy \
   --output-dir /workspace/outputs \
   --epochs 100 \
   --batch-size-per-gpu 8 \
@@ -108,7 +119,7 @@ torchrun --nproc_per_node=4 train_ddp.py \
 ```bash
 torchrun --nproc_per_node=4 train_ddp.py \
   --model-architecture unet_attention \
-  --data-dir /workspace/data/preprocessed_npy \
+  --data-dir /workspace/data/prepared_npy \
   --output-dir /workspace/outputs \
   --epochs 100 \
   --batch-size-per-gpu 8 \
@@ -117,39 +128,33 @@ torchrun --nproc_per_node=4 train_ddp.py \
 
 ## Улучшения качества
 
-По умолчанию включено:
+В training config по умолчанию:
 
-- `sampling.balanced_train: true`;
-- `sampling.positive_fraction: 0.5`;
+- `train.img_size: 256`;
+- `val.img_size: 512`;
+- `test.img_size: 512`;
 - `loss.focal_tversky_weight: 0.5`;
 - `loss.tversky_alpha: 0.3`;
 - `loss.tversky_beta: 0.7`;
 - threshold search от `0.05` до `0.90` с шагом `0.05`.
 
-Параметры можно менять из CLI:
+Параметры качества можно менять из CLI:
 
 ```bash
 torchrun --nproc_per_node=4 train_ddp.py \
-  --data-dir /workspace/data/preprocessed_npy \
+  --data-dir /workspace/data/prepared_npy \
   --output-dir /workspace/outputs \
   --epochs 100 \
   --batch-size-per-gpu 8 \
-  --positive-fraction 0.6 \
   --focal-tversky-weight 0.75 \
   --tversky-beta 0.8
-```
-
-Отключить balanced sampling:
-
-```bash
---no-balanced-sampling
 ```
 
 Smoke test:
 
 ```bash
 torchrun --nproc_per_node=1 train_ddp.py \
-  --data-dir /workspace/data/preprocessed_npy \
+  --data-dir /workspace/data/prepared_npy \
   --output-dir /workspace/outputs \
   --epochs 1 \
   --batch-size-per-gpu 2 \
@@ -168,11 +173,11 @@ docker build -t lung-unet-ddp:latest 2-stage
 
 ```bash
 docker run --gpus all --rm -it \
-  -v /server/path/preprocessed_npy:/workspace/data/preprocessed_npy \
+  -v /server/path/prepared_npy:/workspace/data/prepared_npy \
   -v /server/path/outputs:/workspace/outputs \
   lung-unet-ddp:latest \
   torchrun --nproc_per_node=4 train_ddp.py \
-    --data-dir /workspace/data/preprocessed_npy \
+    --data-dir /workspace/data/prepared_npy \
     --output-dir /workspace/outputs \
     --epochs 100 \
     --batch-size-per-gpu 8 \

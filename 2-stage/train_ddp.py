@@ -16,7 +16,6 @@ from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
 from dataset import (
-    BalancedPositiveNegativeSampler,
     DistributedEvalSampler,
     LungTumorNpyDataset,
     compute_mask_pixel_statistics,
@@ -46,7 +45,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 def default_config() -> dict[str, Any]:
     return {
         "data": {
-            "data_dir": "preprocessed_npy",
+            "data_dir": "prepared_npy",
             "img_size": 512,
             "validate_files": True,
         },
@@ -84,20 +83,14 @@ def default_config() -> dict[str, Any]:
             "pos_weight_max": 20.0,
             "pos_weight_min": 1.0,
         },
-        "sampling": {
-            "balanced_train": True,
-            "positive_fraction": 0.5,
-            "samples_per_epoch": None,
+        "train": {
+            "img_size": 256,
         },
-        "augmentation": {
-            "enabled": True,
-            "horizontal_flip_p": 0.5,
-            "vertical_flip_p": 0.0,
-            "rotate90_p": 0.0,
-            "intensity_scale": 0.10,
-            "intensity_shift": 0.05,
-            "gaussian_noise_std": 0.01,
-            "clip_image": True,
+        "val": {
+            "img_size": 512,
+        },
+        "test": {
+            "img_size": 512,
         },
         "training": {
             "epochs": 100,
@@ -174,6 +167,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--weight-decay", type=float, default=None)
     parser.add_argument("--img-size", type=int, default=None)
+    parser.add_argument("--train-img-size", type=int, default=None)
+    parser.add_argument("--val-img-size", type=int, default=None)
+    parser.add_argument("--test-img-size", type=int, default=None)
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument(
@@ -213,19 +209,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scheduler", choices=["none", "cosine", "plateau"], default=None)
     parser.add_argument("--grad-clip-norm", type=float, default=None)
     parser.add_argument("--resume", type=str, default=None)
-    parser.add_argument("--positive-fraction", type=float, default=None)
-    parser.add_argument("--samples-per-epoch", type=int, default=None)
-    parser.add_argument(
-        "--balanced-sampling",
-        dest="balanced_sampling",
-        action="store_true",
-        default=None,
-    )
-    parser.add_argument(
-        "--no-balanced-sampling",
-        dest="balanced_sampling",
-        action="store_false",
-    )
     parser.add_argument("--focal-tversky-weight", type=float, default=None)
     parser.add_argument("--tversky-beta", type=float, default=None)
 
@@ -271,6 +254,9 @@ def build_effective_config(args: argparse.Namespace) -> dict[str, Any]:
     overrides = {
         ("data", "data_dir"): args.data_dir,
         ("data", "img_size"): args.img_size,
+        ("train", "img_size"): args.train_img_size,
+        ("val", "img_size"): args.val_img_size,
+        ("test", "img_size"): args.test_img_size,
         ("output", "output_dir"): args.output_dir,
         ("output", "run_name"): args.run_name,
         ("output", "run_type"): args.run_type,
@@ -289,9 +275,6 @@ def build_effective_config(args: argparse.Namespace) -> dict[str, Any]:
         ("training", "grad_clip_norm"): args.grad_clip_norm,
         ("training", "resume"): args.resume,
         ("metrics", "threshold"): args.threshold,
-        ("sampling", "balanced_train"): args.balanced_sampling,
-        ("sampling", "positive_fraction"): args.positive_fraction,
-        ("sampling", "samples_per_epoch"): args.samples_per_epoch,
         ("loss", "focal_tversky_weight"): args.focal_tversky_weight,
         ("loss", "tversky_beta"): args.tversky_beta,
     }
@@ -470,8 +453,16 @@ def make_worker_init_fn(seed: int, rank: int):
         worker_seed = int(seed) + int(rank) * 1000 + int(worker_id)
         random.seed(worker_seed)
         np.random.seed(worker_seed)
+        torch.manual_seed(worker_seed)
 
     return _init_fn
+
+
+def get_split_img_size(cfg: dict[str, Any], split: str) -> int:
+    value = cfg.get(split, {}).get("img_size", None)
+    if value is None:
+        value = cfg["data"]["img_size"]
+    return int(value)
 
 
 def build_loader(
@@ -848,6 +839,11 @@ def main() -> None:
             "total_batch_size": int(cfg["training"]["batch_size_per_gpu"]) * world_size,
             "run_group": run_group,
             "model_group": model_group,
+            "split_img_sizes": {
+                "train": get_split_img_size(cfg, "train"),
+                "val": get_split_img_size(cfg, "val"),
+                "test": get_split_img_size(cfg, "test"),
+            },
         }
 
         if is_main:
@@ -866,14 +862,31 @@ def main() -> None:
             if not rows_by_split[split_name]:
                 raise ValueError(f"No rows for split={split_name!r} in manifest.csv")
 
+        train_rows = rows_by_split["train"]
+        train_selection_stats = {
+            "source": "manifest.csv",
+            "note": "balance, augmentation and patch sampling are prepared in 1-stage",
+            "train_slices": len(train_rows),
+            "positive_slices": sum(int(float(row["has_tumor"])) for row in train_rows),
+            "negative_slices": sum(1 - int(float(row["has_tumor"])) for row in train_rows),
+        }
+        if not train_rows:
+            raise ValueError("Train rows are empty.")
+
         split_stats = compute_split_statistics(prepared_rows, splits)
+        split_stats["train_selection"] = train_selection_stats
+        split_img_sizes = {
+            "train": get_split_img_size(cfg, "train"),
+            "val": get_split_img_size(cfg, "val"),
+            "test": get_split_img_size(cfg, "test"),
+        }
         sample_info = inspect_npy_samples(
             rows_by_split,
-            img_size=int(cfg["data"]["img_size"]),
+            img_sizes_by_split=split_img_sizes,
         )
         auto_pos_weight_stats = maybe_configure_auto_pos_weight(
             cfg=cfg,
-            train_rows=rows_by_split["train"],
+            train_rows=train_rows,
             is_main=is_main,
         )
         if auto_pos_weight_stats is not None:
@@ -894,35 +907,22 @@ def main() -> None:
             save_json(split_stats, metrics_dir / "split_statistics.json")
 
         train_dataset = LungTumorNpyDataset(
-            rows_by_split["train"],
+            train_rows,
             data_dir=data_dir,
-            img_size=int(cfg["data"]["img_size"]),
-            augment=bool(cfg["augmentation"].get("enabled", False)),
-            augmentation_config=cfg["augmentation"],
+            img_size=get_split_img_size(cfg, "train"),
         )
         val_dataset = LungTumorNpyDataset(
             rows_by_split["val"],
             data_dir=data_dir,
-            img_size=int(cfg["data"]["img_size"]),
+            img_size=get_split_img_size(cfg, "val"),
         )
         test_dataset = LungTumorNpyDataset(
             rows_by_split["test"],
             data_dir=data_dir,
-            img_size=int(cfg["data"]["img_size"]),
+            img_size=get_split_img_size(cfg, "test"),
         )
 
-        sampling_cfg = cfg.get("sampling", {})
-        if bool(sampling_cfg.get("balanced_train", False)):
-            train_sampler = BalancedPositiveNegativeSampler(
-                train_dataset,
-                positive_fraction=float(sampling_cfg.get("positive_fraction", 0.5)),
-                samples_per_epoch=sampling_cfg.get("samples_per_epoch"),
-                num_replicas=world_size,
-                rank=rank,
-                seed=int(cfg["training"]["seed"]),
-            )
-            train_sampling_stats = train_sampler.statistics()
-        elif dist_info["distributed"]:
+        if dist_info["distributed"]:
             train_sampler = DistributedSampler(
                 train_dataset,
                 num_replicas=world_size,
@@ -931,16 +931,8 @@ def main() -> None:
                 seed=int(cfg["training"]["seed"]),
                 drop_last=False,
             )
-            train_sampling_stats = {
-                "enabled": False,
-                "sampler": "DistributedSampler",
-            }
         else:
             train_sampler = None
-            train_sampling_stats = {
-                "enabled": False,
-                "sampler": "DataLoader shuffle",
-            }
 
         if dist_info["distributed"]:
             val_sampler = DistributedEvalSampler(
@@ -956,9 +948,6 @@ def main() -> None:
         else:
             val_sampler = None
             test_sampler = None
-
-        if is_main:
-            log_dict(data_logger, train_sampling_stats, title="train sampling")
 
         batch_size = int(cfg["training"]["batch_size_per_gpu"])
         num_workers = int(cfg["training"]["num_workers"])
@@ -1067,6 +1056,7 @@ def main() -> None:
             hyperparameters = {
                 "architecture": cfg["model"],
                 "img_size": cfg["data"]["img_size"],
+                "split_img_sizes": split_img_sizes,
                 "batch_size_per_gpu": batch_size,
                 "total_batch_size": batch_size * world_size,
                 "epochs": cfg["training"]["epochs"],
@@ -1080,8 +1070,9 @@ def main() -> None:
                 "ddp_world_size": world_size,
                 "run_group": run_group,
                 "model_group": model_group,
-                "augmentation": cfg["augmentation"],
-                "sampling": cfg.get("sampling", {}),
+                "train": cfg["train"],
+                "val": cfg["val"],
+                "test": cfg["test"],
                 "loss": cfg["loss"],
                 "threshold": threshold,
                 "threshold_candidates": threshold_candidates,

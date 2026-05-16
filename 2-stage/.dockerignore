@@ -5,6 +5,7 @@ __pycache__
 .pytest_cache
 outputs
 preprocessed_npy
+prepared_npy
 imagesTr
 labelsTr
 *.nii
