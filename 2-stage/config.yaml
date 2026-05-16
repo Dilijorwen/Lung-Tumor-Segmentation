@@ -60,7 +60,7 @@ training:
   scheduler: cosine
   min_learning_rate: 0.000001
   num_workers: 8
-  seed: 42
+  seed: 2004
   mixed_precision: true
   grad_clip_norm: 0.0
   resume: null

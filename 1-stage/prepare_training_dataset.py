@@ -86,7 +86,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--negative-ratio", type=float, default=1.0)
     parser.add_argument("--augmentations-per-positive", type=int, default=1)
     parser.add_argument("--augmentations-per-negative", type=int, default=1)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=2004)
     parser.add_argument("--torch-num-threads", type=int, default=4)
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()

@@ -101,7 +101,7 @@ def default_config() -> dict[str, Any]:
             "scheduler": "cosine",
             "min_learning_rate": 1e-6,
             "num_workers": 8,
-            "seed": 42,
+            "seed": 2004,
             "mixed_precision": True,
             "grad_clip_norm": 0.0,
             "resume": None,

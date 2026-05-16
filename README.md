@@ -23,7 +23,7 @@ python 1-stage/prepare_training_dataset.py \
   --negative-ratio 1.0 \
   --augmentations-per-positive 1 \
   --augmentations-per-negative 1 \
-  --seed 42 \
+  --seed 2004 \
   --overwrite
 ```
 
