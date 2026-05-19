@@ -20,17 +20,10 @@ preprocessed_npy/
 После этого нужно создать готовый training dataset:
 
 ```bash
-python 1-stage/prepare_training_dataset.py \
-  --data-dir preprocessed_npy \
-  --output-dir prepared_npy \
-  --mode patch \
-  --patch-size 256 \
-  --negative-ratio 1.0 \
-  --augmentations-per-positive 1 \
-  --augmentations-per-negative 1 \
-  --seed 2004 \
-  --overwrite
+python 1-stage/prepare_training_dataset.py
 ```
+
+Основные параметры меняются в верхнем блоке `SETTINGS` внутри `prepare_training_dataset.py`: пути, режим `patch/full_slice`, `patch_size`, баланс negative, число offline-аугментаций, seed и overwrite. Параметры самих аугментаций лежат в `prepare_training_config.yaml`.
 
 Результат:
 

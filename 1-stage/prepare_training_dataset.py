@@ -14,6 +14,28 @@ from tqdm import tqdm
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = SCRIPT_DIR.parent
+
+
+# =========================
+# SETTINGS
+# =========================
+# These defaults are used when running:
+# python 1-stage/prepare_training_dataset.py
+DATA_DIR = PROJECT_ROOT / "preprocessed_npy"
+OUTPUT_DIR = PROJECT_ROOT / "prepared_npy"
+CONFIG_PATH = SCRIPT_DIR / "prepare_training_config.yaml"
+
+MODE = "patch"  # "patch" or "full_slice"
+IMG_SIZE = 512
+PATCH_SIZE = 256
+PATCH_CENTER_JITTER = 64
+NEGATIVE_RATIO = 1.0
+AUGMENTATIONS_PER_POSITIVE = 1
+AUGMENTATIONS_PER_NEGATIVE = 1
+SEED = 2004
+TORCH_NUM_THREADS = 4
+OVERWRITE_OUTPUT = True
 
 REQUIRED_MANIFEST_COLUMNS = {
     "split",
@@ -72,24 +94,56 @@ def parse_args() -> argparse.Namespace:
             "augmentations, and optional tumor-centered patches."
         )
     )
-    parser.add_argument("--data-dir", type=str, required=True)
-    parser.add_argument("--output-dir", type=str, required=True)
+    parser.add_argument("--data-dir", type=str, default=str(DATA_DIR))
+    parser.add_argument("--output-dir", type=str, default=str(OUTPUT_DIR))
     parser.add_argument(
         "--config",
         type=str,
-        default=str(SCRIPT_DIR / "prepare_training_config.yaml"),
+        default=str(CONFIG_PATH),
     )
-    parser.add_argument("--mode", choices=["patch", "full_slice"], default="patch")
-    parser.add_argument("--img-size", type=int, default=512)
-    parser.add_argument("--patch-size", type=int, default=256)
-    parser.add_argument("--patch-center-jitter", type=int, default=64)
-    parser.add_argument("--negative-ratio", type=float, default=1.0)
-    parser.add_argument("--augmentations-per-positive", type=int, default=1)
-    parser.add_argument("--augmentations-per-negative", type=int, default=1)
-    parser.add_argument("--seed", type=int, default=2004)
-    parser.add_argument("--torch-num-threads", type=int, default=4)
-    parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--mode", choices=["patch", "full_slice"], default=MODE)
+    parser.add_argument("--img-size", type=int, default=IMG_SIZE)
+    parser.add_argument("--patch-size", type=int, default=PATCH_SIZE)
+    parser.add_argument("--patch-center-jitter", type=int, default=PATCH_CENTER_JITTER)
+    parser.add_argument("--negative-ratio", type=float, default=NEGATIVE_RATIO)
+    parser.add_argument(
+        "--augmentations-per-positive",
+        type=int,
+        default=AUGMENTATIONS_PER_POSITIVE,
+    )
+    parser.add_argument(
+        "--augmentations-per-negative",
+        type=int,
+        default=AUGMENTATIONS_PER_NEGATIVE,
+    )
+    parser.add_argument("--seed", type=int, default=SEED)
+    parser.add_argument("--torch-num-threads", type=int, default=TORCH_NUM_THREADS)
+    parser.add_argument("--overwrite", dest="overwrite", action="store_true")
+    parser.add_argument("--no-overwrite", dest="overwrite", action="store_false")
+    parser.set_defaults(overwrite=OVERWRITE_OUTPUT)
     return parser.parse_args()
+
+
+def resolve_project_path(value: str | Path) -> Path:
+    path = Path(value).expanduser()
+    if path.is_absolute():
+        return path.resolve(strict=False)
+
+    cwd_path = (Path.cwd() / path).resolve(strict=False)
+    if cwd_path.exists():
+        return cwd_path
+    return (PROJECT_ROOT / path).resolve(strict=False)
+
+
+def resolve_config_path(value: str | Path) -> Path:
+    path = Path(value).expanduser()
+    if path.is_absolute():
+        return path.resolve(strict=False)
+
+    cwd_path = (Path.cwd() / path).resolve(strict=False)
+    if cwd_path.exists():
+        return cwd_path
+    return (SCRIPT_DIR / path).resolve(strict=False)
 
 
 def load_augmentation_config(config_path: str | Path) -> dict[str, Any]:
@@ -826,18 +880,32 @@ def main() -> None:
         raise ValueError("augmentation counts must be non-negative")
 
     torch.set_num_threads(max(int(args.torch_num_threads), 1))
-    data_dir = Path(args.data_dir).expanduser().resolve(strict=False)
-    output_dir = Path(args.output_dir).expanduser().resolve(strict=False)
+    data_dir = resolve_project_path(args.data_dir)
+    output_dir = resolve_project_path(args.output_dir)
+    config_path = resolve_config_path(args.config)
+
+    print("Training dataset preparation settings:")
+    print(f"  data_dir: {data_dir}")
+    print(f"  output_dir: {output_dir}")
+    print(f"  config: {config_path}")
+    print(f"  mode: {args.mode}")
+    print(f"  patch_size: {args.patch_size if args.mode == 'patch' else 'disabled'}")
+    print(f"  negative_ratio: {args.negative_ratio}")
+    print(f"  augmentations_per_positive: {args.augmentations_per_positive}")
+    print(f"  augmentations_per_negative: {args.augmentations_per_negative}")
+    print(f"  seed: {args.seed}")
+    print(f"  overwrite: {args.overwrite}")
+
     if output_dir.exists():
         if not args.overwrite:
             raise FileExistsError(
                 f"Output directory already exists: {output_dir}. "
-                "Use --overwrite to replace it."
+                "Set OVERWRITE_OUTPUT = True or use --overwrite to replace it."
             )
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    augmentation_config = load_augmentation_config(args.config)
+    augmentation_config = load_augmentation_config(config_path)
     splits = load_splits(data_dir)
     rows = load_manifest(data_dir)
     prepared_rows, file_report = prepare_manifest_rows(

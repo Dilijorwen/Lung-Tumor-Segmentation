@@ -15,17 +15,10 @@
 Второй шаг этапа создаёт `prepared_npy/`, который уже отправляется на сервер и используется обучением:
 
 ```bash
-python 1-stage/prepare_training_dataset.py \
-  --data-dir preprocessed_npy \
-  --output-dir prepared_npy \
-  --mode patch \
-  --patch-size 256 \
-  --negative-ratio 1.0 \
-  --augmentations-per-positive 1 \
-  --augmentations-per-negative 1 \
-  --seed 2004 \
-  --overwrite
+python 1-stage/prepare_training_dataset.py
 ```
+
+Основные параметры меняются в верхнем блоке `SETTINGS` внутри `1-stage/prepare_training_dataset.py`. Параметры самих аугментаций лежат в `1-stage/prepare_training_config.yaml`.
 
 ## 2-stage: training
 
