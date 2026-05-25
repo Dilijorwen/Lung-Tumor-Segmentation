@@ -140,18 +140,20 @@ def _as_int_tuple(value, default: tuple[int, ...]) -> tuple[int, ...]:
     return tuple(int(item) for item in value)
 
 
-def normalize_smp_architecture(config: dict) -> str:
+def normalize_model_architecture(config: dict) -> str:
     aliases = {
         "smpunet": "unet",
         "smp_unet": "unet",
         "library_unet": "unet",
         "unet": "unet",
-        "smpattentionunet": "unet_attention",
-        "smp_attention_unet": "unet_attention",
-        "attentionunet": "unet_attention",
-        "attention_unet": "unet_attention",
-        "unet_attention": "unet_attention",
-        "unetattention": "unet_attention",
+        "monaiattentionunet": "attention_unet",
+        "monai_attention_unet": "attention_unet",
+        "attentionunet": "attention_unet",
+        "attention_unet": "attention_unet",
+        "attention-unet": "attention_unet",
+        "unet_attention": "attention_unet",
+        "unet-attention": "attention_unet",
+        "unetattention": "attention_unet",
         "smpunetplusplus": "unet++",
         "smp_unetplusplus": "unet++",
         "smp_unet_plus_plus": "unet++",
@@ -173,14 +175,14 @@ def normalize_smp_architecture(config: dict) -> str:
         return name
 
     raw_value = config.get("architecture", config.get("name", "SMPUnet"))
-    raise ValueError(f"Unsupported SMP architecture: {raw_value!r}")
+    raise ValueError(f"Unsupported model architecture: {raw_value!r}")
 
 
 def model_output_name(config: dict) -> str:
     name = str(config.get("name", "")).strip().lower()
     if name in {"unet2d", "legacy_unet2d", "custom_unet"}:
         return "unet2d"
-    return normalize_smp_architecture(config)
+    return normalize_model_architecture(config)
 
 
 def _build_smp_unet(config: dict) -> nn.Module:
@@ -192,7 +194,10 @@ def _build_smp_unet(config: dict) -> nn.Module:
             "Install it with: pip install segmentation-models-pytorch"
         ) from exc
 
-    architecture = normalize_smp_architecture(config)
+    architecture = normalize_model_architecture(config)
+    if architecture not in {"unet", "unet++"}:
+        raise ValueError(f"SMP builder does not support architecture={architecture!r}")
+
     encoder_depth = int(config.get("encoder_depth", 5))
     decoder_channels = _as_int_tuple(
         config.get("decoder_channels"),
@@ -204,10 +209,6 @@ def _build_smp_unet(config: dict) -> nn.Module:
             f"got {len(decoder_channels)} channels for depth {encoder_depth}"
         )
 
-    decoder_attention_type = _as_none(config.get("decoder_attention_type", None))
-    if architecture == "unet_attention" and decoder_attention_type is None:
-        decoder_attention_type = "scse"
-
     model_cls = smp.UnetPlusPlus if architecture == "unet++" else smp.Unet
     return model_cls(
         encoder_name=str(config.get("encoder_name", "resnet34")),
@@ -215,10 +216,44 @@ def _build_smp_unet(config: dict) -> nn.Module:
         encoder_weights=_as_none(config.get("encoder_weights", None)),
         decoder_use_batchnorm=bool(config.get("decoder_use_batchnorm", True)),
         decoder_channels=decoder_channels,
-        decoder_attention_type=decoder_attention_type,
+        decoder_attention_type=_as_none(config.get("decoder_attention_type", None)),
         in_channels=int(config.get("in_channels", 1)),
         classes=int(config.get("out_channels", config.get("classes", 1))),
         activation=None,
+    )
+
+
+def _build_monai_attention_unet(config: dict) -> nn.Module:
+    try:
+        from monai.networks.nets import AttentionUnet
+    except ImportError as exc:
+        raise ImportError(
+            "MONAI is required for attention_unet. Install it with: pip install monai"
+        ) from exc
+
+    channels = _as_int_tuple(
+        config.get("channels"),
+        default=(64, 128, 256, 512, 1024),
+    )
+    strides = _as_int_tuple(
+        config.get("strides"),
+        default=tuple(2 for _ in range(len(channels) - 1)),
+    )
+    if len(strides) != len(channels) - 1:
+        raise ValueError(
+            "MONAI AttentionUnet expects len(strides) == len(channels) - 1: "
+            f"got {len(strides)} strides for {len(channels)} channel levels"
+        )
+
+    return AttentionUnet(
+        spatial_dims=int(config.get("spatial_dims", 2)),
+        in_channels=int(config.get("in_channels", 1)),
+        out_channels=int(config.get("out_channels", config.get("classes", 1))),
+        channels=channels,
+        strides=strides,
+        kernel_size=int(config.get("kernel_size", 3)),
+        up_kernel_size=int(config.get("up_kernel_size", 3)),
+        dropout=float(config.get("dropout", 0.0)),
     )
 
 
@@ -238,19 +273,25 @@ def build_model(config: dict) -> nn.Module:
     if name in {"unet2d", "legacy_unet2d", "custom_unet"}:
         return _build_legacy_unet(config)
 
+    if name in {"smpattentionunet", "smp_attention_unet"}:
+        raise ValueError(
+            "SMPAttentionUnet was the old SMP+SCSE variant and is no longer used as "
+            "Attention U-Net. Retrain with name=MONAIAttentionUnet / "
+            "architecture=attention_unet."
+        )
+
+    architecture = normalize_model_architecture(config)
+    if architecture == "attention_unet" or library == "monai":
+        return _build_monai_attention_unet(config)
+
     if library in {"segmentation_models_pytorch", "smp"} or name in {
         "smpunet",
         "smp_unet",
         "smpunetplusplus",
         "smp_unetplusplus",
-        "smpattentionunet",
-        "smp_attention_unet",
         "library_unet",
         "library_unetplusplus",
-        "library_attention_unet",
         "unet",
-        "unet_attention",
-        "attention_unet",
         "unet++",
         "unetplusplus",
         "unet_plus_plus",
@@ -260,5 +301,6 @@ def build_model(config: dict) -> nn.Module:
     raise ValueError(
         "Unsupported model config. Use name=SMPUnet for library U-Net, "
         "name=SMPUnetPlusPlus for library U-Net++, "
-        "name=SMPAttentionUnet for attention U-Net, or name=UNet2D for legacy checkpoints."
+        "name=MONAIAttentionUnet for attention U-Net, or name=UNet2D for "
+        "legacy checkpoints."
     )

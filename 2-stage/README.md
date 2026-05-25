@@ -6,7 +6,7 @@
 
 - `train_ddp.py` — основной training script с DDP.
 - `dataset.py` — чтение `splits.json`, `manifest.csv`, проверка путей и загрузка `.npy`.
-- `model.py` — библиотечный 2D U-Net через `segmentation_models_pytorch` и legacy `UNet2D` для старых checkpoint.
+- `model.py` — библиотечные модели: U-Net/U-Net++ через `segmentation_models_pytorch`, Attention U-Net через `MONAI` и legacy `UNet2D` для старых checkpoint.
 - `losses.py` — `BCEWithLogitsLoss + DiceLoss`.
 - `metrics.py` — Dice/F1, Precision, Recall.
 - `utils_logging.py` — логи, CSV/JSON/YAML, run-директории.
@@ -27,12 +27,12 @@ U-Net++ задаётся в `config_unetplusplus.yaml` как `SMPUnetPlusPlus`:
 - тот же `resnet34` encoder;
 - train может идти на patch `[1, 256, 256]`, val/test остаются `[1, 512, 512]`.
 
-Attention U-Net задаётся в `config_attention_unet.yaml` как `SMPAttentionUnet`:
+Attention U-Net задаётся в `config_attention_unet.yaml` как `MONAIAttentionUnet`:
 
-- `segmentation_models_pytorch.Unet`;
-- `decoder_attention_type: scse`;
-- `ddp.find_unused_parameters: true`, потому что attention-блоки SMP могут оставлять часть параметров без gradient на отдельных итерациях;
-- тот же `resnet34` encoder;
+- `monai.networks.nets.AttentionUnet`;
+- attention gates используются на skip connections, это не SMP `decoder_attention_type: scse`;
+- базовые каналы: `[64, 128, 256, 512, 1024]`;
+- `ddp.find_unused_parameters: false`, все параметры участвуют в forward;
 - train может идти на patch `[1, 256, 256]`, val/test остаются `[1, 512, 512]`.
 
 Для старых checkpoint сохранена legacy-совместимость: если в checkpoint config указано `model.name: UNet2D`, `build_model` создаст прежнюю самописную U-Net.
@@ -75,8 +75,8 @@ torchrun --nproc_per_node=4 train_ddp.py \
 
 - U-Net: `outputs/train/unet/run_YYYYMMDD_HHMMSS/`;
 - U-Net++: `outputs/train/unet++/run_YYYYMMDD_HHMMSS/`;
-- Attention U-Net: `outputs/train/unet_attention/run_YYYYMMDD_HHMMSS/`;
-- smoke/debug: `outputs/test/unet/...`, `outputs/test/unet++/...` или `outputs/test/unet_attention/...`.
+- Attention U-Net: `outputs/train/attention_unet/run_YYYYMMDD_HHMMSS/`;
+- smoke/debug: `outputs/test/unet/...`, `outputs/test/unet++/...` или `outputs/test/attention_unet/...`.
 
 U-Net++:
 
@@ -118,7 +118,7 @@ torchrun --nproc_per_node=4 train_ddp.py \
 
 ```bash
 torchrun --nproc_per_node=4 train_ddp.py \
-  --model-architecture unet_attention \
+  --model-architecture attention_unet \
   --data-dir /workspace/data/prepared_npy \
   --output-dir /workspace/outputs \
   --epochs 100 \

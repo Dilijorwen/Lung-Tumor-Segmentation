@@ -184,7 +184,7 @@ def parse_args() -> argparse.Namespace:
             "attention-unet",
         ],
         default=None,
-        help="Library model architecture: unet, unet++, or unet_attention.",
+        help="Model architecture: unet, unet++, or attention_unet.",
     )
     parser.add_argument("--encoder-name", type=str, default=None)
     parser.add_argument(
@@ -296,7 +296,7 @@ def build_effective_config(args: argparse.Namespace) -> dict[str, Any]:
 
     if args.model_architecture is not None:
         architecture = model_output_name({"architecture": args.model_architecture})
-        if architecture != "unet_attention":
+        if architecture in {"unet", "unet++"}:
             cfg["model"]["decoder_attention_type"] = None
     else:
         architecture = model_output_name(cfg["model"])
@@ -304,11 +304,16 @@ def build_effective_config(args: argparse.Namespace) -> dict[str, Any]:
     if architecture == "unet++":
         cfg["model"]["name"] = "SMPUnetPlusPlus"
         cfg["model"]["library"] = "segmentation_models_pytorch"
-    elif architecture == "unet_attention":
-        cfg["model"]["name"] = "SMPAttentionUnet"
-        cfg["model"]["library"] = "segmentation_models_pytorch"
-        if cfg["model"].get("decoder_attention_type") is None:
-            cfg["model"]["decoder_attention_type"] = "scse"
+    elif architecture == "attention_unet":
+        cfg["model"]["name"] = "MONAIAttentionUnet"
+        cfg["model"]["library"] = "monai"
+        cfg["model"].setdefault("spatial_dims", 2)
+        cfg["model"].setdefault("channels", [64, 128, 256, 512, 1024])
+        cfg["model"].setdefault("strides", [2, 2, 2, 2])
+        cfg["model"].setdefault("kernel_size", 3)
+        cfg["model"].setdefault("up_kernel_size", 3)
+        cfg["model"].setdefault("dropout", 0.0)
+        cfg["model"].pop("decoder_attention_type", None)
     elif architecture == "unet":
         cfg["model"]["name"] = "SMPUnet"
         cfg["model"]["library"] = "segmentation_models_pytorch"

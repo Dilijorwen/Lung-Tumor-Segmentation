@@ -26,14 +26,14 @@ python 1-stage/prepare_training_dataset.py
 
 - `train_ddp.py` — DDP-обучение через `torchrun`, validation/test, чекпоинты, логи.
 - `dataset.py` — чтение `manifest.csv` и загрузка `.npy`.
-- `model.py` — библиотечный 2D U-Net через `segmentation_models_pytorch` с legacy-совместимостью для старых checkpoint.
+- `model.py` — библиотечные модели: U-Net/U-Net++ через `segmentation_models_pytorch`, Attention U-Net через `MONAI`, legacy-совместимость для старых checkpoint.
 - `losses.py` — `BCEWithLogitsLoss + DiceLoss`.
 - `metrics.py` — Dice/F1, Precision, Recall.
 - `utils_logging.py` — run-директории, отдельные log-файлы, JSON/YAML/CSV.
 - `inference.py` — инференс одного `.npy`-среза через `best_model.pth`.
 - `Dockerfile`, `docker-compose.yml`, `requirements.txt`, `config.yaml`, `config_unetplusplus.yaml`, `config_attention_unet.yaml` — контейнерный запуск.
 
-В `2-stage` используется библиотечный U-Net через `segmentation_models_pytorch`: обычный `Unet`, `UnetPlusPlus` и Attention U-Net на базе `Unet` с `decoder_attention_type: scse`. Для Attention U-Net включён `ddp.find_unused_parameters`, чтобы DDP корректно работал с attention-блоками SMP. Все варианты используют `resnet34` encoder без pretrained weights.
+В `2-stage` используется библиотечный U-Net через `segmentation_models_pytorch`: обычный `Unet` и `UnetPlusPlus` с `resnet34` encoder без pretrained weights. Attention U-Net реализован отдельно через `monai.networks.nets.AttentionUnet` с attention gates на skip connections; это не SMP `decoder_attention_type: scse`.
 
 `2-stage` не делает балансировку, patch sampling или аугментации. Он читает `prepared_npy/`, созданный в `1-stage`.
 
@@ -114,7 +114,7 @@ docker compose -f 2-stage/docker-compose.yml up --build
 
 Каждый запуск пишет отдельную директорию `outputs/<тип>/<модель>/run_YYYYMMDD_HHMMSS/`:
 
-Полное обучение U-Net сохраняется в `outputs/train/unet/run_YYYYMMDD_HHMMSS/`, U-Net++ — в `outputs/train/unet++/run_YYYYMMDD_HHMMSS/`, Attention U-Net — в `outputs/train/unet_attention/run_YYYYMMDD_HHMMSS/`. Smoke/debug запуск на 1 эпоху и 1 GPU автоматически сохраняется в `outputs/test/<модель>/run_YYYYMMDD_HHMMSS/`.
+Полное обучение U-Net сохраняется в `outputs/train/unet/run_YYYYMMDD_HHMMSS/`, U-Net++ — в `outputs/train/unet++/run_YYYYMMDD_HHMMSS/`, Attention U-Net — в `outputs/train/attention_unet/run_YYYYMMDD_HHMMSS/`. Smoke/debug запуск на 1 эпоху и 1 GPU автоматически сохраняется в `outputs/test/<модель>/run_YYYYMMDD_HHMMSS/`.
 
 - `logs/data_loading.log`
 - `logs/hyperparameters.log`
