@@ -105,14 +105,12 @@ def write_history_csv(rows: list[dict[str, Any]], path: str | Path) -> None:
         "train_tversky_loss",
         "train_focal_tversky_loss",
         "train_dice",
-        "train_f1_score",
         "val_loss",
         "val_bce_loss",
         "val_dice_loss",
         "val_tversky_loss",
         "val_focal_tversky_loss",
         "val_dice",
-        "val_f1_score",
         "val_best_dice",
         "val_best_threshold",
         "val_best_precision",
@@ -122,6 +120,8 @@ def write_history_csv(rows: list[dict[str, Any]], path: str | Path) -> None:
         "lr",
         "epoch_time_sec",
         "gpu_memory_gb",
+        "early_stop_no_improve_epochs",
+        "early_stop_triggered",
     ]
     with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)

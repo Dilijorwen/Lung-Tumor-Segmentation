@@ -23,6 +23,17 @@ preprocessed_npy/
 python 1-stage/prepare_training_dataset.py
 ```
 
+По умолчанию создаётся `prepared_npy/` с `patch_size=256`, `augmentations_per_positive=4` и `augmentations_per_negative=2`.
+
+Отдельный эксперимент с `patch_size=384` нужно писать в другую папку:
+
+```bash
+python 1-stage/prepare_training_dataset.py \
+  --output-dir prepared_npy_patch384 \
+  --patch-size 384 \
+  --patch-center-jitter 96
+```
+
 Основные параметры меняются в верхнем блоке `SETTINGS` внутри `prepare_training_dataset.py`: пути, режим `patch/full_slice`, `patch_size`, баланс negative, число offline-аугментаций, seed и overwrite. Параметры самих аугментаций лежат в `prepare_training_config.yaml`.
 
 Результат:

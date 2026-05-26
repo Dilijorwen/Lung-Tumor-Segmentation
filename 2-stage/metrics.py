@@ -43,7 +43,6 @@ def metrics_from_confusion(
 
     return {
         "dice": dice,
-        "f1_score": dice,
         "precision": precision,
         "recall": recall,
         "specificity": specificity,

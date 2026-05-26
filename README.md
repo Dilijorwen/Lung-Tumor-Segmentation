@@ -18,7 +18,16 @@
 python 1-stage/prepare_training_dataset.py
 ```
 
-Основные параметры меняются в верхнем блоке `SETTINGS` внутри `1-stage/prepare_training_dataset.py`. Параметры самих аугментаций лежат в `1-stage/prepare_training_config.yaml`.
+По умолчанию train расширяется offline сильнее: `augmentations_per_positive=4`, `augmentations_per_negative=2`. Отдельный эксперимент с patch `384x384` готовится в другую папку:
+
+```bash
+python 1-stage/prepare_training_dataset.py \
+  --output-dir prepared_npy_patch384 \
+  --patch-size 384 \
+  --patch-center-jitter 96
+```
+
+Для обучения на `prepared_npy_patch384` во втором этапе нужно передать `--train-img-size 384`. Основные параметры меняются в верхнем блоке `SETTINGS` внутри `1-stage/prepare_training_dataset.py`. Параметры самих аугментаций лежат в `1-stage/prepare_training_config.yaml`.
 
 ## 2-stage: training
 
@@ -28,7 +37,7 @@ python 1-stage/prepare_training_dataset.py
 - `dataset.py` — чтение `manifest.csv` и загрузка `.npy`.
 - `model.py` — библиотечные модели: U-Net/U-Net++ через `segmentation_models_pytorch`, Attention U-Net через `MONAI`, legacy-совместимость для старых checkpoint.
 - `losses.py` — `BCEWithLogitsLoss + DiceLoss`.
-- `metrics.py` — Dice/F1, Precision, Recall.
+- `metrics.py` — Dice, Precision, Recall.
 - `utils_logging.py` — run-директории, отдельные log-файлы, JSON/YAML/CSV.
 - `inference.py` — инференс одного `.npy`-среза через `best_model.pth`.
 - `Dockerfile`, `docker-compose.yml`, `requirements.txt`, `config.yaml`, `config_unetplusplus.yaml`, `config_attention_unet.yaml` — контейнерный запуск.
@@ -82,7 +91,10 @@ torchrun --nproc_per_node=4 2-stage/train_ddp.py \
 ```bash
 --focal-tversky-weight 0.5
 --tversky-beta 0.7
---threshold-candidates 0.05,0.10,0.15,0.20,0.25,0.30,0.35,0.40,0.45,0.50,0.55,0.60,0.65,0.70,0.75,0.80,0.85,0.90
+--early-stopping-patience 20
+--early-stopping-min-delta 0.001
+--early-stopping-min-epochs 30
+# threshold_candidates по умолчанию: 0.025..0.950, шаг 0.025
 ```
 
 ## Docker
@@ -124,7 +136,6 @@ docker compose -f 2-stage/docker-compose.yml up --build
 - `logs/best_model.log`
 - `logs/errors.log`
 - `checkpoints/best_model.pth`
-- `checkpoints/last_model.pth`
 - `metrics/history.csv`
 - `metrics/history.json`
 - `metrics/best_model_metrics.json`

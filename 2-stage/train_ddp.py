@@ -106,27 +106,18 @@ def default_config() -> dict[str, Any]:
             "grad_clip_norm": 0.0,
             "resume": None,
         },
+        "early_stopping": {
+            "enabled": True,
+            "monitor": "val_best_dice",
+            "mode": "max",
+            "patience": 20,
+            "min_delta": 0.001,
+            "min_epochs": 30,
+        },
         "metrics": {
             "threshold": 0.5,
             "threshold_candidates": [
-                0.05,
-                0.10,
-                0.15,
-                0.20,
-                0.25,
-                0.30,
-                0.35,
-                0.40,
-                0.45,
-                0.50,
-                0.55,
-                0.60,
-                0.65,
-                0.70,
-                0.75,
-                0.80,
-                0.85,
-                0.90,
+                round(0.025 * index, 3) for index in range(1, 39)
             ],
         },
         "ddp": {
@@ -211,6 +202,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--focal-tversky-weight", type=float, default=None)
     parser.add_argument("--tversky-beta", type=float, default=None)
+    parser.add_argument("--early-stopping-patience", type=int, default=None)
+    parser.add_argument("--early-stopping-min-delta", type=float, default=None)
+    parser.add_argument("--early-stopping-min-epochs", type=int, default=None)
+
+    early_stop_group = parser.add_mutually_exclusive_group()
+    early_stop_group.add_argument(
+        "--early-stopping",
+        dest="early_stopping_enabled",
+        action="store_true",
+    )
+    early_stop_group.add_argument(
+        "--no-early-stopping",
+        dest="early_stopping_enabled",
+        action="store_false",
+    )
+    parser.set_defaults(early_stopping_enabled=None)
 
     amp_group = parser.add_mutually_exclusive_group()
     amp_group.add_argument("--amp", dest="mixed_precision", action="store_true")
@@ -277,6 +284,10 @@ def build_effective_config(args: argparse.Namespace) -> dict[str, Any]:
         ("metrics", "threshold"): args.threshold,
         ("loss", "focal_tversky_weight"): args.focal_tversky_weight,
         ("loss", "tversky_beta"): args.tversky_beta,
+        ("early_stopping", "enabled"): args.early_stopping_enabled,
+        ("early_stopping", "patience"): args.early_stopping_patience,
+        ("early_stopping", "min_delta"): args.early_stopping_min_delta,
+        ("early_stopping", "min_epochs"): args.early_stopping_min_epochs,
     }
     for (section, key), value in overrides.items():
         if value is not None:
@@ -568,7 +579,6 @@ def reduce_threshold_tracker(
         "threshold_metrics": threshold_metrics,
         "best_threshold": best_threshold,
         "best_dice": best_metrics["dice"],
-        "best_f1_score": best_metrics["f1_score"],
         "best_precision": best_metrics["precision"],
         "best_recall": best_metrics["recall"],
     }
@@ -728,7 +738,6 @@ def format_epoch_metrics(prefix: str, metrics: dict[str, float]) -> str:
         f"{prefix}_tversky_loss={metrics['tversky_loss']:.6f}",
         f"{prefix}_focal_tversky_loss={metrics['focal_tversky_loss']:.6f}",
         f"{prefix}_dice={metrics['dice']:.6f}",
-        f"{prefix}_f1={metrics['f1_score']:.6f}",
         f"{prefix}_precision={metrics['precision']:.6f}",
         f"{prefix}_recall={metrics['recall']:.6f}",
     ]
@@ -1079,6 +1088,7 @@ def main() -> None:
                 "val": cfg["val"],
                 "test": cfg["test"],
                 "loss": cfg["loss"],
+                "early_stopping": cfg["early_stopping"],
                 "threshold": threshold,
                 "threshold_candidates": threshold_candidates,
             }
@@ -1088,6 +1098,29 @@ def main() -> None:
         epochs = int(cfg["training"]["epochs"])
         grad_clip_norm = float(cfg["training"].get("grad_clip_norm", 0.0))
         best_model_metrics: dict[str, Any] | None = None
+        early_cfg = cfg.get("early_stopping", {})
+        early_stopping_enabled = bool(early_cfg.get("enabled", False))
+        early_stopping_monitor = str(early_cfg.get("monitor", "val_best_dice"))
+        early_stopping_mode = str(early_cfg.get("mode", "max")).lower()
+        early_stopping_patience = int(early_cfg.get("patience", 20))
+        early_stopping_min_delta = float(early_cfg.get("min_delta", 0.001))
+        early_stopping_min_epochs = int(early_cfg.get("min_epochs", 30))
+        if early_stopping_monitor != "val_best_dice":
+            raise ValueError(
+                "Only early_stopping.monitor=val_best_dice is supported, "
+                f"got {early_stopping_monitor!r}"
+            )
+        if early_stopping_mode != "max":
+            raise ValueError(
+                "Only early_stopping.mode=max is supported, "
+                f"got {early_stopping_mode!r}"
+            )
+        if early_stopping_patience < 1:
+            raise ValueError("early_stopping.patience must be >= 1")
+        if early_stopping_min_epochs < 1:
+            raise ValueError("early_stopping.min_epochs must be >= 1")
+        early_stopping_best = best_val_dice
+        no_improve_epochs = 0
 
         for epoch in range(start_epoch, epochs + 1):
             if train_sampler is not None:
@@ -1142,6 +1175,19 @@ def main() -> None:
             if is_best:
                 best_val_dice = selection_dice
                 best_threshold = selection_threshold
+            has_meaningful_improvement = (
+                selection_dice > early_stopping_best + early_stopping_min_delta
+            )
+            if has_meaningful_improvement:
+                early_stopping_best = selection_dice
+                no_improve_epochs = 0
+            else:
+                no_improve_epochs += 1
+            early_stop_triggered = (
+                early_stopping_enabled
+                and epoch >= early_stopping_min_epochs
+                and no_improve_epochs >= early_stopping_patience
+            )
 
             if is_main:
                 training_logger.info(
@@ -1160,17 +1206,6 @@ def main() -> None:
                     bool(is_best),
                 )
 
-                save_checkpoint(
-                    checkpoints_dir / "last_model.pth",
-                    model=model,
-                    optimizer=optimizer,
-                    scheduler=scheduler,
-                    scaler=scaler,
-                    epoch=epoch,
-                    best_val_dice=best_val_dice,
-                    best_threshold=best_threshold,
-                    config=cfg,
-                )
                 row = {
                     "epoch": epoch,
                     "train_loss": train_metrics["total_loss"],
@@ -1179,14 +1214,12 @@ def main() -> None:
                     "train_tversky_loss": train_metrics["tversky_loss"],
                     "train_focal_tversky_loss": train_metrics["focal_tversky_loss"],
                     "train_dice": train_metrics["dice"],
-                    "train_f1_score": train_metrics["f1_score"],
                     "val_loss": val_metrics["total_loss"],
                     "val_bce_loss": val_metrics["bce_loss"],
                     "val_dice_loss": val_metrics["dice_loss"],
                     "val_tversky_loss": val_metrics["tversky_loss"],
                     "val_focal_tversky_loss": val_metrics["focal_tversky_loss"],
                     "val_dice": val_metrics["dice"],
-                    "val_f1_score": val_metrics["f1_score"],
                     "val_best_dice": val_metrics.get("best_dice"),
                     "val_best_threshold": val_metrics.get("best_threshold"),
                     "val_best_precision": val_metrics.get("best_precision"),
@@ -1196,6 +1229,8 @@ def main() -> None:
                     "lr": lr,
                     "epoch_time_sec": epoch_time,
                     "gpu_memory_gb": gpu_memory_gb,
+                    "early_stop_no_improve_epochs": no_improve_epochs,
+                    "early_stop_triggered": early_stop_triggered,
                 }
                 history.append(row)
                 write_history_csv(history, metrics_dir / "history.csv")
@@ -1245,9 +1280,25 @@ def main() -> None:
                         epoch_time,
                         gpu_memory_gb,
                     )
+                if early_stop_triggered:
+                    training_logger.info(
+                        "early_stopping | stopped=True | epoch=%d | "
+                        "best_val_dice=%.6f | early_stopping_best=%.6f | "
+                        "no_improve_epochs=%d | patience=%d | min_delta=%.6f | "
+                        "min_epochs=%d",
+                        epoch,
+                        best_val_dice,
+                        early_stopping_best,
+                        no_improve_epochs,
+                        early_stopping_patience,
+                        early_stopping_min_delta,
+                        early_stopping_min_epochs,
+                    )
 
             if distributed_is_initialized():
                 dist.barrier()
+            if early_stop_triggered:
+                break
 
         if distributed_is_initialized():
             dist.barrier()
@@ -1302,7 +1353,6 @@ def main() -> None:
                 "tversky_loss": test_metrics["tversky_loss"],
                 "focal_tversky_loss": test_metrics["focal_tversky_loss"],
                 "dice": test_metrics["dice"],
-                "f1_score": test_metrics["f1_score"],
                 "precision": test_metrics["precision"],
                 "recall": test_metrics["recall"],
                 "specificity": test_metrics["specificity"],

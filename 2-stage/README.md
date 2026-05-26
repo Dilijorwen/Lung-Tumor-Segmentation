@@ -8,7 +8,7 @@
 - `dataset.py` — чтение `splits.json`, `manifest.csv`, проверка путей и загрузка `.npy`.
 - `model.py` — библиотечные модели: U-Net/U-Net++ через `segmentation_models_pytorch`, Attention U-Net через `MONAI` и legacy `UNet2D` для старых checkpoint.
 - `losses.py` — `BCEWithLogitsLoss + DiceLoss`.
-- `metrics.py` — Dice/F1, Precision, Recall.
+- `metrics.py` — Dice, Precision, Recall.
 - `utils_logging.py` — логи, CSV/JSON/YAML, run-директории.
 - `inference.py` — инференс одного `.npy`-среза.
 - `Dockerfile`, `docker-compose.yml`, `requirements.txt`, `config.yaml`, `config_unetplusplus.yaml`, `config_attention_unet.yaml` — Docker-запуск.
@@ -46,6 +46,7 @@ Attention U-Net задаётся в `config_attention_unet.yaml` как `MONAIAt
 - positive patch центрируется около bounding box опухоли с jitter;
 - negative patch берётся как случайный crop фона;
 - train-аугментации применяются offline и сохраняются на диск;
+- по умолчанию offline создаётся `4` augmented positive-варианта и `2` augmented negative-варианта;
 - val/test копируются в `prepared_npy/val` и `prepared_npy/test` без аугментаций.
 
 Улучшения обучения в `2-stage`:
@@ -53,6 +54,7 @@ Attention U-Net задаётся в `config_attention_unet.yaml` как `MONAIAt
 - автоматический `pos_weight` для BCE, рассчитанный по train masks и ограниченный `pos_weight_max`;
 - `BCE + Dice + FocalTversky`, где Tversky сильнее штрафует false negatives;
 - подбор лучшего threshold по validation Dice, сохранение `best_threshold` в checkpoint;
+- early stopping по `val_best_dice`, чтобы не продолжать обучение после плато;
 - inference по умолчанию использует `best_threshold` из checkpoint.
 
 ## Запуск
@@ -68,6 +70,8 @@ torchrun --nproc_per_node=4 train_ddp.py \
   --lr 1e-4 \
   --img-size 512
 ```
+
+Если первый этап был запущен как отдельный эксперимент `prepared_npy_patch384`, добавьте `--train-img-size 384` и смонтируйте/укажите эту папку как `--data-dir`.
 
 Полные запуски пишутся в `outputs/train/<модель>/run_YYYYMMDD_HHMMSS/`. Smoke/debug запуск на 1 эпоху и 1 GPU автоматически пишется в `outputs/test/<модель>/run_YYYYMMDD_HHMMSS/`.
 
@@ -136,7 +140,10 @@ torchrun --nproc_per_node=4 train_ddp.py \
 - `loss.focal_tversky_weight: 0.5`;
 - `loss.tversky_alpha: 0.3`;
 - `loss.tversky_beta: 0.7`;
-- threshold search от `0.05` до `0.90` с шагом `0.05`.
+- `early_stopping.patience: 20`;
+- `early_stopping.min_delta: 0.001`;
+- `early_stopping.min_epochs: 30`;
+- threshold search от `0.025` до `0.950` с шагом `0.025`.
 
 Параметры качества можно менять из CLI:
 
@@ -148,6 +155,18 @@ torchrun --nproc_per_node=4 train_ddp.py \
   --batch-size-per-gpu 8 \
   --focal-tversky-weight 0.75 \
   --tversky-beta 0.8
+```
+
+Early stopping можно отключить или переопределить из CLI:
+
+```bash
+torchrun --nproc_per_node=4 train_ddp.py \
+  --data-dir /workspace/data/prepared_npy \
+  --output-dir /workspace/outputs \
+  --epochs 100 \
+  --batch-size-per-gpu 8 \
+  --early-stopping-patience 25 \
+  --early-stopping-min-delta 0.0005
 ```
 
 Smoke test:
