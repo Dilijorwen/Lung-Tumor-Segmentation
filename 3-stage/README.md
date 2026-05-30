@@ -36,16 +36,17 @@ jupyter notebook 3-stage/visualize_prediction.ipynb
 
 Notebook загружает модель из `3-stage/best_model.pth` и архитектуру из `2-stage/model.py`.
 
-В первой кодовой ячейке выберите пациента:
+В первой кодовой ячейке выберите набор данных:
 
 ```python
 DATASET_DIR = REPO_ROOT / "preprocessed_npy"  # или "prepared_npy"
 SPLIT = "test"
-CASE_ID = "lung_096"
+POSITIVE_CASE_ONLY = True
+RANDOM_SEED = None
 INFERENCE_BATCH_SIZE = 8
 ```
 
-Notebook сам найдёт все пары `.npy` в папках `images/` и `masks/`, выполнит inference для всех срезов и покажет интерактивное слайд-шоу с Play-кнопкой и slider.
+Notebook прочитает `manifest.csv`, случайно выберет пациента из указанного split, найдёт все пары `.npy` в папках `images/` и `masks/`, выполнит inference для всех срезов и сформирует встроенное HTML5-видео. По умолчанию выбираются только пациенты с хотя бы одним опухолевым срезом. Установите `POSITIVE_CASE_ONLY = False`, если нужны также пациенты без опухоли. Для повторяемого случайного выбора установите, например, `RANDOM_SEED = 2004`.
 
 Каждый кадр состоит из трёх наложенных слоёв:
 
@@ -53,4 +54,10 @@ Notebook сам найдёт все пары `.npy` в папках `images/` и
 2. Истинная маска опухоли — синяя область.
 3. Предсказанная моделью маска — красная область.
 
-Для текущего среза показываются `Dice`, `Precision` и `Recall`. После inference также печатаются агрегированные метрики по всему объёму пациента. Threshold берётся из `best_threshold` внутри checkpoint; если его нет, используется `0.5`.
+Для текущего среза показываются `Dice`, `Precision` и `Recall`. После inference также печатаются агрегированные метрики и диагностические счётчики по всему объёму пациента. Threshold берётся из `best_threshold` внутри checkpoint; если его нет, используется `0.5`.
+
+Для формирования HTML5-видео нужен `ffmpeg`. На macOS при необходимости установите его:
+
+```bash
+brew install ffmpeg
+```
