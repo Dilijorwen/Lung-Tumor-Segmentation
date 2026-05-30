@@ -1,15 +1,20 @@
-# 3-stage: local prediction visualization
+# 3-stage: local prediction slideshow
 
-Этот этап нужен для локальной проверки обученной модели. Он не обучает модель и не требует Docker.
+Этот этап нужен для локального просмотра предсказаний обученной модели. Он не обучает модель и не требует Docker.
 
 ## Что нужно локально
 
-- положить в папку `3-stage/` ровно три файла:
+Положить модель в папку `3-stage/`:
 
 ```text
 3-stage/best_model.pth
-3-stage/image.npy
-3-stage/mask.npy
+```
+
+КТ-срезы и маски остаются в корневой папке `preprocessed_npy/` или `prepared_npy/`, например:
+
+```text
+preprocessed_npy/test/lung_096/images/z0092.npy
+preprocessed_npy/test/lung_096/masks/z0092.npy
 ```
 
 ## Установка окружения
@@ -29,13 +34,23 @@ python -m pip install -r 3-stage/requirements.txt
 jupyter notebook 3-stage/visualize_prediction.ipynb
 ```
 
-Notebook загружает U-Net из `2-stage/model.py`, поэтому запускать его нужно вместе с репозиторием. Модель всегда берётся только из `3-stage/best_model.pth`.
+Notebook загружает модель из `3-stage/best_model.pth` и архитектуру из `2-stage/model.py`.
 
-Для checkpoint с `model.name: SMPUnet` или `model.name: SMPUnetPlusPlus` нужна зависимость `segmentation-models-pytorch`. Для нового `model.name: MONAIAttentionUnet` нужна зависимость `monai`. Обе зависимости уже добавлены в `3-stage/requirements.txt`. Старые checkpoint с `model.name: UNet2D` продолжают открываться через legacy-модель в `2-stage/model.py`.
+В первой кодовой ячейке выберите пациента:
 
-Основная визуализация — единое наложение на CT-срез:
+```python
+DATASET_DIR = REPO_ROOT / "preprocessed_npy"  # или "prepared_npy"
+SPLIT = "test"
+CASE_ID = "lung_096"
+INFERENCE_BATCH_SIZE = 8
+```
 
-- синяя область — настоящая маска опухоли (`ground truth`);
-- красная область — предсказанная моделью маска (`prediction`).
+Notebook сам найдёт все пары `.npy` в папках `images/` и `masks/`, выполнит inference для всех срезов и покажет интерактивное слайд-шоу с Play-кнопкой и slider.
 
-В заголовке изображения выводятся `Dice`, `Precision`, `Recall` и использованный threshold. Порог берётся из `best_threshold` внутри checkpoint. Если его там нет, используется `0.5`.
+Каждый кадр состоит из трёх наложенных слоёв:
+
+1. CT-срез — серый фон.
+2. Истинная маска опухоли — синяя область.
+3. Предсказанная моделью маска — красная область.
+
+Для текущего среза показываются `Dice`, `Precision` и `Recall`. После inference также печатаются агрегированные метрики по всему объёму пациента. Threshold берётся из `best_threshold` внутри checkpoint; если его нет, используется `0.5`.
