@@ -155,7 +155,7 @@ python 2-stage/inference.py \
 
 ## 3-stage: local visualization
 
-Папка `3-stage/` содержит Jupyter notebook для локального просмотра предсказаний на `.npy`-срезах. Модель всегда нужно положить в `3-stage/best_model.pth`. Notebook показывает единое наложение на CT: настоящая маска синяя, предсказанная маска красная. Также сохраняются PNG, `.npy`-маска, `.npy`-probability map и JSON-summary.
+Папка `3-stage/` содержит Jupyter notebook для локального просмотра предсказания. Положите в неё `best_model.pth`, `image.npy` и `mask.npy`. Notebook показывает единое наложение на CT: настоящая маска синяя, предсказанная маска красная. В заголовке выводятся `Dice`, `Precision` и `Recall`.
 
 Запуск:
 
