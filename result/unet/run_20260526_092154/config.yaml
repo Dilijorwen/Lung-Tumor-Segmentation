@@ -1,0 +1,137 @@
+data:
+  data_dir: /workspace/data/prepared_npy
+  img_size: 512
+  validate_files: true
+output:
+  output_dir: /workspace/outputs
+  run_name: null
+  run_type: train
+  model_group: unet
+model:
+  name: SMPUnet
+  architecture: unet
+  library: segmentation_models_pytorch
+  encoder_name: resnet34
+  encoder_weights: null
+  encoder_depth: 5
+  in_channels: 1
+  out_channels: 1
+  decoder_channels:
+  - 256
+  - 128
+  - 64
+  - 32
+  - 16
+  decoder_use_batchnorm: true
+  decoder_attention_type: null
+  sync_batchnorm: false
+loss:
+  name: BCEWithLogitsLoss + DiceLoss + FocalTverskyLoss
+  bce_weight: 1.0
+  dice_weight: 1.0
+  dice_smooth: 1.0
+  tversky_weight: 0.0
+  focal_tversky_weight: 0.5
+  tversky_alpha: 0.3
+  tversky_beta: 0.7
+  focal_tversky_gamma: 0.75
+  pos_weight: 20.0
+  auto_pos_weight: true
+  pos_weight_max: 20.0
+  pos_weight_min: 1.0
+  auto_pos_weight_stats:
+    slices: 9384
+    total_pixels: 614989824
+    positive_pixels: 6214331
+    negative_pixels: 608775493
+    positive_fraction: 0.01010477044901478
+    raw_pos_weight: 97.96315854433888
+    mode: auto
+    pos_weight_min: 1.0
+    pos_weight_max: 20.0
+    used_pos_weight: 20.0
+    pos_weight_was_clipped: true
+train:
+  img_size: 256
+val:
+  img_size: 512
+test:
+  img_size: 512
+training:
+  epochs: 200
+  batch_size_per_gpu: 8
+  learning_rate: 0.0001
+  weight_decay: 1.0e-05
+  optimizer: AdamW
+  scheduler: cosine
+  min_learning_rate: 1.0e-06
+  num_workers: 8
+  seed: 2004
+  mixed_precision: true
+  grad_clip_norm: 0.0
+  resume: null
+early_stopping:
+  enabled: true
+  monitor: val_best_dice
+  mode: max
+  patience: 20
+  min_delta: 0.001
+  min_epochs: 30
+metrics:
+  threshold: 0.5
+  threshold_candidates:
+  - 0.025
+  - 0.05
+  - 0.075
+  - 0.1
+  - 0.125
+  - 0.15
+  - 0.175
+  - 0.2
+  - 0.225
+  - 0.25
+  - 0.275
+  - 0.3
+  - 0.325
+  - 0.35
+  - 0.375
+  - 0.4
+  - 0.425
+  - 0.45
+  - 0.475
+  - 0.5
+  - 0.525
+  - 0.55
+  - 0.575
+  - 0.6
+  - 0.625
+  - 0.65
+  - 0.675
+  - 0.7
+  - 0.725
+  - 0.75
+  - 0.775
+  - 0.8
+  - 0.825
+  - 0.85
+  - 0.875
+  - 0.9
+  - 0.925
+  - 0.95
+  - 0.975
+ddp:
+  backend: nccl
+  find_unused_parameters: false
+runtime:
+  distributed: true
+  backend: nccl
+  world_size: 4
+  local_rank: 0
+  device: cuda:0
+  total_batch_size: 32
+  run_group: train
+  model_group: unet
+  split_img_sizes:
+    train: 256
+    val: 512
+    test: 512

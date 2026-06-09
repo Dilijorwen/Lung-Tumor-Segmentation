@@ -1,0 +1,112 @@
+data:
+  data_dir: /workspace/data/preprocessed_npy
+  img_size: 512
+  validate_files: true
+output:
+  output_dir: /workspace/outputs
+  run_name: null
+  run_type: train
+  model_group: unet_attention
+model:
+  name: SMPAttentionUnet
+  architecture: unet_attention
+  library: segmentation_models_pytorch
+  encoder_name: resnet34
+  encoder_weights: null
+  encoder_depth: 5
+  in_channels: 1
+  out_channels: 1
+  decoder_channels:
+  - 256
+  - 128
+  - 64
+  - 32
+  - 16
+  decoder_use_batchnorm: true
+  decoder_attention_type: scse
+  sync_batchnorm: false
+loss:
+  name: BCEWithLogitsLoss + DiceLoss + FocalTverskyLoss
+  bce_weight: 1.0
+  dice_weight: 1.0
+  dice_smooth: 1.0
+  tversky_weight: 0.0
+  focal_tversky_weight: 0.5
+  tversky_alpha: 0.3
+  tversky_beta: 0.7
+  focal_tversky_gamma: 0.75
+  pos_weight: 20.0
+  auto_pos_weight: true
+  pos_weight_max: 20.0
+  pos_weight_min: 1.0
+  auto_pos_weight_stats:
+    slices: 2346
+    total_pixels: 614989824
+    positive_pixels: 1242738
+    negative_pixels: 613747086
+    positive_fraction: 0.0020207456310691735
+    raw_pos_weight: 493.8668375796025
+    mode: auto
+    pos_weight_min: 1.0
+    pos_weight_max: 20.0
+    used_pos_weight: 20.0
+    pos_weight_was_clipped: true
+sampling:
+  balanced_train: true
+  positive_fraction: 0.5
+  samples_per_epoch: null
+augmentation:
+  enabled: true
+  horizontal_flip_p: 0.5
+  vertical_flip_p: 0.0
+  rotate90_p: 0.0
+  intensity_scale: 0.1
+  intensity_shift: 0.05
+  gaussian_noise_std: 0.01
+  clip_image: true
+training:
+  epochs: 100
+  batch_size_per_gpu: 8
+  learning_rate: 0.0001
+  weight_decay: 1.0e-05
+  optimizer: AdamW
+  scheduler: cosine
+  min_learning_rate: 1.0e-06
+  num_workers: 8
+  seed: 42
+  mixed_precision: true
+  grad_clip_norm: 0.0
+  resume: null
+metrics:
+  threshold: 0.5
+  threshold_candidates:
+  - 0.05
+  - 0.1
+  - 0.15
+  - 0.2
+  - 0.25
+  - 0.3
+  - 0.35
+  - 0.4
+  - 0.45
+  - 0.5
+  - 0.55
+  - 0.6
+  - 0.65
+  - 0.7
+  - 0.75
+  - 0.8
+  - 0.85
+  - 0.9
+ddp:
+  backend: nccl
+  find_unused_parameters: true
+runtime:
+  distributed: true
+  backend: nccl
+  world_size: 4
+  local_rank: 0
+  device: cuda:0
+  total_batch_size: 32
+  run_group: train
+  model_group: unet_attention
