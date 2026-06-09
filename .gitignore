@@ -308,4 +308,4 @@ cython_debug/
 #.idea/
 
 3-stage/predictions
-3-stage/best_model.pth
+preprocessed_npy/
