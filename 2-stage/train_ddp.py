@@ -25,6 +25,7 @@ from dataset import (
     load_splits,
     prepare_manifest_rows,
     split_rows,
+    validate_split_integrity,
 )
 from losses import BCEDiceLoss
 from metrics import confusion_from_probabilities, metrics_from_confusion
@@ -870,6 +871,7 @@ def main() -> None:
             data_dir=data_dir,
             validate_files=bool(cfg["data"].get("validate_files", True)),
         )
+        split_integrity_report = validate_split_integrity(prepared_rows, splits)
         rows_by_split = split_rows(prepared_rows)
 
         for split_name in ("train", "val", "test"):
@@ -888,6 +890,7 @@ def main() -> None:
             raise ValueError("Train rows are empty.")
 
         split_stats = compute_split_statistics(prepared_rows, splits)
+        split_stats["split_integrity"] = split_integrity_report
         split_stats["train_selection"] = train_selection_stats
         split_img_sizes = {
             "train": get_split_img_size(cfg, "train"),

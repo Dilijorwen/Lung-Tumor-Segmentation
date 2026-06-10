@@ -221,6 +221,50 @@ def path_candidates(
     return unique
 
 
+def validate_resolved_sample_path(
+    path: str | Path,
+    split: str,
+    case_id: str,
+    kind: str,
+) -> None:
+    path = Path(path).expanduser().resolve(strict=False)
+    folder = "images" if kind == "image" else "masks"
+    parts = path.parts
+    expected = (str(split), str(case_id), folder)
+    for index in range(0, max(len(parts) - 2, 0)):
+        if parts[index : index + 3] == expected:
+            return
+    raise ValueError(
+        "Data leakage risk: resolved manifest path does not match row split/case. "
+        f"kind={kind}, split={split!r}, case_id={case_id!r}, path={path}"
+    )
+
+
+def validate_manifest_reference(
+    raw_path: str | Path,
+    split: str,
+    case_id: str,
+    kind: str,
+) -> None:
+    raw = Path(str(raw_path))
+    folder = "images" if kind == "image" else "masks"
+    parts = raw.parts
+    expected = (str(split), str(case_id), folder)
+
+    for index in range(0, max(len(parts) - 2, 0)):
+        if parts[index : index + 3] == expected:
+            return
+
+    split_names = {"train", "val", "test"}
+    for index in range(0, max(len(parts) - 2, 0)):
+        if parts[index] in split_names and parts[index + 2] == folder:
+            raise ValueError(
+                "Data leakage risk: manifest path points to a different "
+                f"split/case than the row metadata. kind={kind}, "
+                f"split={split!r}, case_id={case_id!r}, raw_path={raw_path!r}"
+            )
+
+
 def resolve_manifest_path(
     raw_path: str | Path,
     data_dir: str | Path,
@@ -256,6 +300,18 @@ def prepare_manifest_rows(
     for row in rows:
         split = str(row["split"])
         case_id = str(row["case_id"])
+        validate_manifest_reference(
+            row["image_path"],
+            split=split,
+            case_id=case_id,
+            kind="image",
+        )
+        validate_manifest_reference(
+            row["mask_path"],
+            split=split,
+            case_id=case_id,
+            kind="mask",
+        )
         image_path = resolve_manifest_path(
             row["image_path"],
             data_dir=data_dir,
@@ -268,6 +324,18 @@ def prepare_manifest_rows(
             row["mask_path"],
             data_dir=data_dir,
             manifest_dir=data_dir,
+            split=split,
+            case_id=case_id,
+            kind="mask",
+        )
+        validate_resolved_sample_path(
+            image_path,
+            split=split,
+            case_id=case_id,
+            kind="image",
+        )
+        validate_resolved_sample_path(
+            mask_path,
             split=split,
             case_id=case_id,
             kind="mask",
@@ -293,6 +361,77 @@ def split_rows(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
             raise ValueError(f"Unexpected split in manifest.csv: {split!r}")
         result[split].append(row)
     return result
+
+
+def _split_case_ids(splits: dict[str, Any]) -> dict[str, set[str]]:
+    result: dict[str, set[str]] = {}
+    for split in ("train", "val", "test"):
+        values = splits.get(split, [])
+        if not isinstance(values, list):
+            raise ValueError(f"splits.json field {split!r} must be a list")
+        result[split] = {str(value) for value in values}
+    return result
+
+
+def validate_split_integrity(
+    rows: list[dict[str, Any]],
+    splits: dict[str, Any],
+    max_examples: int = 20,
+) -> dict[str, Any]:
+    split_case_ids = _split_case_ids(splits)
+
+    case_to_splits: dict[str, set[str]] = {}
+    for split, case_ids in split_case_ids.items():
+        for case_id in case_ids:
+            case_to_splits.setdefault(case_id, set()).add(split)
+    split_duplicates = {
+        case_id: sorted(split_names)
+        for case_id, split_names in sorted(case_to_splits.items())
+        if len(split_names) > 1
+    }
+    if split_duplicates:
+        examples = dict(list(split_duplicates.items())[:max_examples])
+        raise ValueError(
+            "Data leakage risk: splits.json assigns the same case_id to "
+            f"multiple splits: {examples}"
+        )
+
+    manifest_case_splits: dict[str, set[str]] = {}
+    mismatched_rows: list[dict[str, str]] = []
+    for row in rows:
+        split = str(row["split"])
+        case_id = str(row["case_id"])
+        if split not in split_case_ids:
+            raise ValueError(f"Unexpected split in manifest.csv: {split!r}")
+
+        manifest_case_splits.setdefault(case_id, set()).add(split)
+        if split_case_ids[split] and case_id not in split_case_ids[split]:
+            mismatched_rows.append(
+                {"split": split, "case_id": case_id, "z": str(row.get("z", ""))}
+            )
+
+    manifest_duplicates = {
+        case_id: sorted(split_names)
+        for case_id, split_names in sorted(manifest_case_splits.items())
+        if len(split_names) > 1
+    }
+    if manifest_duplicates:
+        examples = dict(list(manifest_duplicates.items())[:max_examples])
+        raise ValueError(
+            "Data leakage risk: manifest.csv contains the same case_id in "
+            f"multiple splits: {examples}"
+        )
+    if mismatched_rows:
+        raise ValueError(
+            "Data leakage risk: manifest.csv split/case_id rows do not match "
+            f"splits.json. First examples: {mismatched_rows[:max_examples]}"
+        )
+
+    return {
+        "splits_json_case_overlap": False,
+        "manifest_case_overlap": False,
+        "manifest_matches_splits_json": True,
+    }
 
 
 def as_chw_float32(array: np.ndarray, name: str = "array") -> np.ndarray:
@@ -912,6 +1051,7 @@ def main() -> None:
         rows=rows,
         data_dir=data_dir,
     )
+    split_integrity_report = validate_split_integrity(prepared_rows, splits)
     rows_by_split = split_rows(prepared_rows)
 
     train_rows, train_stats = prepare_train_split(
@@ -949,6 +1089,7 @@ def main() -> None:
         "source_data_dir": str(data_dir),
         "output_dir": str(output_dir),
         "file_verification": file_report,
+        "split_integrity": split_integrity_report,
         "augmentation": augmentation_config,
         "train": train_stats,
         "val": val_stats,

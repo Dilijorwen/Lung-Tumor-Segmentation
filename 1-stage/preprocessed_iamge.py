@@ -208,6 +208,24 @@ def save_patient_slices(
     return rows
 
 
+def validate_patient_splits(splits_payload):
+    case_to_splits = {}
+    for split_name in ("train", "val", "test"):
+        for case_id in splits_payload.get(split_name, []):
+            case_to_splits.setdefault(case_id, set()).add(split_name)
+
+    duplicates = {
+        case_id: sorted(split_names)
+        for case_id, split_names in sorted(case_to_splits.items())
+        if len(split_names) > 1
+    }
+    if duplicates:
+        raise ValueError(
+            "Data leakage risk: the same patient appears in multiple splits: "
+            f"{duplicates}"
+        )
+
+
 
 image_files = get_nifti_files(IMAGES_DIR)
 mask_files = get_nifti_files(MASKS_DIR)
@@ -264,6 +282,7 @@ splits = {
         "save_all_val_test_slices": SAVE_ALL_VAL_TEST_SLICES,
     }
 }
+validate_patient_splits(splits)
 
 with open(OUT_DIR / "splits.json", "w", encoding="utf-8") as f:
     json.dump(splits, f, ensure_ascii=False, indent=4)
