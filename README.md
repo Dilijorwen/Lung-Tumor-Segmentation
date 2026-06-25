@@ -1,6 +1,6 @@
 # Lung-Tumor-Segmentation
 
-Проект разделён на этапы.
+Проект разделён на этапы. Результаты всех эксперементов: [[**Drive Google**]](https://drive.google.com/drive/folders/1ouTlk-_mTPilfnL7fXZcpD24Ty93dvJM?usp=sharing)
 
 ## 1-stage: preprocessing
 
